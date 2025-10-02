@@ -14,6 +14,7 @@ A save file size monitoring and automatic backup tool for Diablo 2 Resurrected
 ### Automatic Backup
 - Auto-backup at danger level (7500 bytes)
 - Periodic auto-backup (5~240 min intervals)
+- Configurable periodic scope (danger-only, warning threshold, or safe zone)
 - Backup compression (50~70% disk space savings)
 
 ### Backup Management
@@ -49,6 +50,7 @@ A save file size monitoring and automatic backup tool for Diablo 2 Resurrected
 ## Backup Settings
 
 - Auto-backup at danger level (7500 bytes)
+- Periodic scope selection (danger-only / warning threshold / entire range)
 - Backup compression (50~70% space savings)
 - Periodic backup (5~240 min)
 - Max backups per file (1~100)
@@ -114,6 +116,7 @@ Diablo 2 Resurrected 세이브 파일 크기 모니터링 및 자동 백업 도�
 ### 자동 백업
 - 위험 수준(7500 bytes) 도달 시 자동 백업
 - 주기적 자동 백업 (5~240분 간격)
+- 주기 백업 범위 선택 (위험만 / 경고 이상 / 전체 구간)
 - 백업 파일 압축 (디스크 공간 50~70% 절약)
 
 ### 백업 관리
@@ -149,6 +152,7 @@ Diablo 2 Resurrected 세이브 파일 크기 모니터링 및 자동 백업 도�
 ## 백업 설정
 
 - 위험 수준 자동 백업 (7500 bytes)
+- 주기 백업 범위 설정 (위험만 / 경고 이상 / 전체 구간)
 - 백업 파일 압축 (50~70% 공간 절약)
 - 주기적 백업 (5~240분)
 - 파일당 최대 백업 개수 (1~100개)

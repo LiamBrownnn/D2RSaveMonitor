@@ -238,8 +238,8 @@ namespace D2RSaveMonitor
                 lblBackupInfo.Text = LanguageManager.GetString("LoadingBackups");
                 lblBackupInfo.ForeColor = Color.Gray;
 
-                // Force UI update before starting background work
-                Application.DoEvents();
+                // UI 업데이트를 한 프레임 비워 사용자에게 로딩 상태를 보여준다
+                await Task.Yield();
 
                 // Load backups in background thread
                 var allBackups = await Task.Run(() => backupManager.GetAllBackups());
@@ -263,8 +263,8 @@ namespace D2RSaveMonitor
                 if (!IsDisposed && IsHandleCreated)
                 {
                     MessageBox.Show(
-                        $"백업 목록 로드 실패:\n{ex.Message}",
-                        "오류",
+                        string.Format(LanguageManager.GetString("BackupLoadFailed"), ex.Message),
+                        LanguageManager.GetString("Error"),
                         MessageBoxButtons.OK,
                         MessageBoxIcon.Error
                     );
@@ -337,7 +337,7 @@ namespace D2RSaveMonitor
                 // Apply filter
                 var filteredBackups = string.IsNullOrEmpty(characterFilter)
                     ? allBackups
-                    : allBackups.Where(b => b.OriginalFile == characterFilter).ToList();
+                    : allBackups.Where(b => string.Equals(b.OriginalFile, characterFilter, StringComparison.OrdinalIgnoreCase)).ToList();
 
                 // Add to grid - 배치 처리로 성능 향상
                 if (filteredBackups.Count > 0)
@@ -348,19 +348,14 @@ namespace D2RSaveMonitor
                     {
                         var backup = filteredBackups[i];
                         string trigger = GetTriggerDisplayName(backup.TriggerReason);
-                        string type = backup.IsAutomatic ? "자동" : "수동";
+                        string type = backup.IsAutomatic
+                            ? LanguageManager.GetString("Automatic")
+                            : LanguageManager.GetString("Manual");
 
                         // 압축 정보 생성
-                        string compressionInfo;
-                        if (backup.IsCompressed)
-                        {
-                            double ratio = backup.GetCompressionRatio();
-                            compressionInfo = $"압축 {ratio:F0}%";
-                        }
-                        else
-                        {
-                            compressionInfo = "-";
-                        }
+                        string compressionInfo = backup.IsCompressed
+                            ? string.Format(LanguageManager.GetString("CompressionRatioFormat"), backup.GetCompressionRatio())
+                            : LanguageManager.GetString("CompressionNotAvailable");
 
                         var row = dgvBackups.Rows[i];
                         row.SetValues(
@@ -378,8 +373,8 @@ namespace D2RSaveMonitor
                 }
 
                 lblBackupInfo.Text = dgvBackups.Rows.Count == 0
-                    ? "백업이 없습니다."
-                    : "백업을 선택하면 상세 정보가 표시됩니다.";
+                    ? LanguageManager.GetString("NoBackups")
+                    : LanguageManager.GetString("BackupInfoPlaceholder");
                 lblBackupInfo.ForeColor = Color.Gray;
             }
             finally
@@ -397,17 +392,17 @@ namespace D2RSaveMonitor
             switch (trigger)
             {
                 case BackupTrigger.DangerThreshold:
-                    return "위험 임계값 도달";
+                    return LanguageManager.GetString("TriggerDanger");
                 case BackupTrigger.PeriodicAutomatic:
-                    return "주기적 자동 백업";
+                    return LanguageManager.GetString("TriggerPeriodic");
                 case BackupTrigger.ManualSingle:
-                    return "수동 백업 (단일)";
+                    return LanguageManager.GetString("TriggerManualSingle");
                 case BackupTrigger.ManualBulk:
-                    return "수동 백업 (전체)";
+                    return LanguageManager.GetString("TriggerManualBulk");
                 case BackupTrigger.PreRestore:
-                    return "복원 전 백업";
+                    return LanguageManager.GetString("TriggerPreRestore");
                 default:
-                    return "알 수 없음";
+                    return LanguageManager.GetString("Unknown");
             }
         }
 
@@ -468,30 +463,42 @@ namespace D2RSaveMonitor
                     var backup = dgvBackups.SelectedRows[0].Tag as BackupMetadata;
                     if (backup != null)
                     {
-                        lblBackupInfo.Text = $"선택된 백업:\n" +
-                                            $"캐릭터: {backup.OriginalFile}\n" +
-                                            $"백업 파일: {backup.BackupFile}\n" +
-                                            $"크기: {backup.FileSize} bytes ({(double)backup.FileSize / FileConstants.MaxFileSize * 100:F1}%)";
+                        lblBackupInfo.Text = string.Format(
+                            LanguageManager.GetString("SelectedBackupInfo"),
+                            Path.GetFileNameWithoutExtension(backup.OriginalFile),
+                            backup.BackupFile,
+                            backup.FileSize,
+                            (double)backup.FileSize / FileConstants.MaxFileSize * 100
+                        );
                     }
 
-                    btnRestore.Text = "복원";
-                    btnDelete.Text = "삭제";
+                    btnRestore.Text = LanguageManager.GetString("Restore");
+                    btnDelete.Text = LanguageManager.GetString("Delete");
                 }
                 // 다중 선택인 경우 선택 개수 표시
                 else
                 {
-                    lblBackupInfo.Text = $"선택된 백업: {selectedCount}개";
-                    btnRestore.Text = $"복원 ({selectedCount}개)";
-                    btnDelete.Text = $"삭제 ({selectedCount}개)";
+                    lblBackupInfo.Text = string.Format(
+                        LanguageManager.GetString("SelectedBackupCount"),
+                        selectedCount
+                    );
+                    btnRestore.Text = string.Format(
+                        LanguageManager.GetString("RestoreWithCount"),
+                        selectedCount
+                    );
+                    btnDelete.Text = string.Format(
+                        LanguageManager.GetString("DeleteWithCount"),
+                        selectedCount
+                    );
                 }
             }
             else
             {
                 btnRestore.Enabled = false;
                 btnDelete.Enabled = false;
-                lblBackupInfo.Text = "백업을 선택하면 상세 정보가 표시됩니다.";
-                btnRestore.Text = "복원";
-                btnDelete.Text = "삭제";
+                lblBackupInfo.Text = LanguageManager.GetString("BackupInfoPlaceholder");
+                btnRestore.Text = LanguageManager.GetString("Restore");
+                btnDelete.Text = LanguageManager.GetString("Delete");
             }
         }
 
@@ -503,8 +510,8 @@ namespace D2RSaveMonitor
             if (dgvBackups.SelectedRows.Count > 1)
             {
                 MessageBox.Show(
-                    "복원은 한 번에 하나의 백업만 가능합니다.\n첫 번째 선택된 백업만 복원됩니다.",
-                    "알림",
+                    LanguageManager.GetString("RestoreOnlyOne"),
+                    LanguageManager.GetString("Notice"),
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Information
                 );
@@ -516,12 +523,13 @@ namespace D2RSaveMonitor
             try
             {
                 var confirmResult = MessageBox.Show(
-                    $"다음 백업으로 복원하시겠습니까?\n\n" +
-                    $"캐릭터: {backup.OriginalFile}\n" +
-                    $"백업 시간: {backup.Timestamp:yyyy-MM-dd HH:mm:ss}\n" +
-                    $"파일 크기: {backup.FileSize} bytes\n\n" +
-                    $"현재 파일은 자동으로 백업됩니다.",
-                    "백업 복원 확인",
+                    string.Format(
+                        LanguageManager.GetString("RestoreConfirm"),
+                        Path.GetFileNameWithoutExtension(backup.OriginalFile),
+                        backup.Timestamp.ToString("yyyy-MM-dd HH:mm:ss"),
+                        backup.FileSize
+                    ),
+                    LanguageManager.GetString("RestoreConfirmTitle"),
                     MessageBoxButtons.YesNo,
                     MessageBoxIcon.Question
                 );
@@ -538,9 +546,12 @@ namespace D2RSaveMonitor
                 if (result.Success)
                 {
                     MessageBox.Show(
-                        $"복원 완료: {backup.OriginalFile}\n\n" +
-                        $"현재 파일은 다음으로 백업되었습니다:\n{result.PreRestoreBackup?.BackupFile}",
-                        "복원 성공",
+                        string.Format(
+                            LanguageManager.GetString("RestoreSuccess"),
+                            Path.GetFileName(backup.OriginalFile),
+                            result.PreRestoreBackup?.BackupFile ?? LanguageManager.GetString("None")
+                        ),
+                        LanguageManager.GetString("RestoreSuccessTitle"),
                         MessageBoxButtons.OK,
                         MessageBoxIcon.Information
                     );
@@ -551,8 +562,8 @@ namespace D2RSaveMonitor
                 else
                 {
                     MessageBox.Show(
-                        $"복원 실패: {result.ErrorMessage}",
-                        "복원 실패",
+                        string.Format(LanguageManager.GetString("RestoreFailed"), result.ErrorMessage),
+                        LanguageManager.GetString("RestoreFailedTitle"),
                         MessageBoxButtons.OK,
                         MessageBoxIcon.Error
                     );
@@ -561,8 +572,8 @@ namespace D2RSaveMonitor
             catch (Exception ex)
             {
                 MessageBox.Show(
-                    $"복원 중 오류 발생:\n{ex.Message}",
-                    "오류",
+                    string.Format(LanguageManager.GetString("RestoreFailed"), ex.Message),
+                    LanguageManager.GetString("Error"),
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Error
                 );
@@ -599,20 +610,23 @@ namespace D2RSaveMonitor
                 if (selectedBackups.Count == 1)
                 {
                     var backup = selectedBackups[0];
-                    confirmMessage = $"다음 백업을 삭제하시겠습니까?\n\n" +
-                                   $"캐릭터: {backup.OriginalFile}\n" +
-                                   $"백업 시간: {backup.Timestamp:yyyy-MM-dd HH:mm:ss}\n\n" +
-                                   $"이 작업은 되돌릴 수 없습니다.";
+                    confirmMessage = string.Format(
+                        LanguageManager.GetString("DeleteConfirm"),
+                        Path.GetFileName(backup.OriginalFile),
+                        backup.Timestamp.ToString("yyyy-MM-dd HH:mm:ss")
+                    );
                 }
                 else
                 {
-                    confirmMessage = $"{selectedBackups.Count}개의 백업을 삭제하시겠습니까?\n\n" +
-                                   $"이 작업은 되돌릴 수 없습니다.";
+                    confirmMessage = string.Format(
+                        LanguageManager.GetString("DeleteMultipleConfirm"),
+                        selectedBackups.Count
+                    );
                 }
 
                 var confirmResult = MessageBox.Show(
                     confirmMessage,
-                    "백업 삭제 확인",
+                    LanguageManager.GetString("DeleteConfirmTitle"),
                     MessageBoxButtons.YesNo,
                     MessageBoxIcon.Warning
                 );
@@ -642,22 +656,37 @@ namespace D2RSaveMonitor
 
                 // 결과 메시지
                 string resultMessage;
+                string resultTitle;
                 if (selectedBackups.Count == 1)
                 {
-                    resultMessage = successCount > 0 ? "백업이 삭제되었습니다." : "백업 삭제에 실패했습니다.";
+                    if (successCount > 0)
+                    {
+                        resultMessage = LanguageManager.GetString("DeleteSuccess");
+                        resultTitle = LanguageManager.GetString("DeleteSuccessTitle");
+                    }
+                    else
+                    {
+                        resultMessage = LanguageManager.GetString("DeleteFailed");
+                        resultTitle = LanguageManager.GetString("DeleteFailedTitle");
+                    }
                 }
                 else
                 {
-                    resultMessage = $"삭제 완료: {successCount}개 성공";
                     if (failCount > 0)
                     {
-                        resultMessage += $", {failCount}개 실패";
+                        resultMessage = string.Format(LanguageManager.GetString("DeletePartialSuccess"), successCount, failCount);
+                        resultTitle = LanguageManager.GetString("DeletePartialTitle");
+                    }
+                    else
+                    {
+                        resultMessage = string.Format(LanguageManager.GetString("DeleteMultipleSuccess"), successCount);
+                        resultTitle = LanguageManager.GetString("DeleteSuccessTitle");
                     }
                 }
 
                 MessageBox.Show(
                     resultMessage,
-                    failCount > 0 ? "삭제 완료 (일부 실패)" : "삭제 완료",
+                    resultTitle,
                     MessageBoxButtons.OK,
                     failCount > 0 ? MessageBoxIcon.Warning : MessageBoxIcon.Information
                 );
@@ -671,8 +700,8 @@ namespace D2RSaveMonitor
             catch (Exception ex)
             {
                 MessageBox.Show(
-                    $"삭제 중 오류 발생:\n{ex.Message}",
-                    "오류",
+                    string.Format(LanguageManager.GetString("DeleteFailedWithReason"), ex.Message),
+                    LanguageManager.GetString("Error"),
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Error
                 );
@@ -707,12 +736,18 @@ namespace D2RSaveMonitor
             catch (Exception ex)
             {
                 MessageBox.Show(
-                    $"새로고침 중 오류 발생:\n{ex.Message}",
-                    "오류",
+                    string.Format(LanguageManager.GetString("RefreshFailed"), ex.Message),
+                    LanguageManager.GetString("Error"),
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Error
                 );
             }
+        }
+
+        protected override void OnFormClosed(FormClosedEventArgs e)
+        {
+            LanguageManager.LanguageChanged -= OnLanguageChanged;
+            base.OnFormClosed(e);
         }
     }
 }

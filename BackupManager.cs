@@ -23,6 +23,10 @@ namespace D2RSaveMonitor
         private bool disposed = false;
         #endregion
 
+        #region Properties
+        public string BackupDirectory => backupDirectory;
+        #endregion
+
         #region Events
         public event EventHandler<BackupEventArgs> BackupStarted;
         public event EventHandler<BackupEventArgs> BackupCompleted;
@@ -176,9 +180,10 @@ namespace D2RSaveMonitor
             try
             {
                 var fileName = Path.GetFileName(characterFile);
-                var backups = Directory.GetFiles(backupDirectory, $"{fileName}_*.d2s")
-                    .Select(backupFile => ParseBackupMetadata(backupFile, fileName))
-                    .Where(metadata => metadata != null)
+                var backups = Directory.GetFiles(backupDirectory, $"{fileName}_*.d2s*")
+                    .Select(backupFile => ParseBackupMetadata(backupFile))
+                    .Where(metadata => metadata != null &&
+                           string.Equals(metadata.OriginalFile, fileName, StringComparison.OrdinalIgnoreCase))
                     .OrderByDescending(m => m.Timestamp)
                     .ToList();
 
@@ -197,37 +202,8 @@ namespace D2RSaveMonitor
         {
             try
             {
-                // .d2s와 .d2s.zip 파일 모두 검색
-                var d2sFiles = Directory.GetFiles(backupDirectory, "*.d2s");
-                var zipFiles = Directory.GetFiles(backupDirectory, "*.d2s.zip");
-                var allBackupFiles = d2sFiles.Concat(zipFiles);
-
-                var backups = allBackupFiles
-                    .Select(backupFile =>
-                    {
-                        var fileName = Path.GetFileName(backupFile);
-
-                        // .d2s.zip 또는 .d2s 확장자 제거
-                        string fileNameWithoutExt;
-                        if (fileName.EndsWith(".d2s.zip", StringComparison.OrdinalIgnoreCase))
-                        {
-                            fileNameWithoutExt = fileName.Substring(0, fileName.Length - 8); // ".d2s.zip" 제거
-                        }
-                        else if (fileName.EndsWith(".d2s", StringComparison.OrdinalIgnoreCase))
-                        {
-                            fileNameWithoutExt = fileName.Substring(0, fileName.Length - 4); // ".d2s" 제거
-                        }
-                        else
-                        {
-                            return null;
-                        }
-
-                        var underscoreIndex = fileNameWithoutExt.LastIndexOf('_');
-                        if (underscoreIndex < 0) return null;
-
-                        var originalName = fileNameWithoutExt.Substring(0, underscoreIndex) + ".d2s";
-                        return ParseBackupMetadata(backupFile, originalName);
-                    })
+                var backups = Directory.GetFiles(backupDirectory, "*.d2s*")
+                    .Select(ParseBackupMetadata)
                     .Where(metadata => metadata != null)
                     .OrderByDescending(m => m.Timestamp)
                     .ToList();
@@ -559,7 +535,7 @@ namespace D2RSaveMonitor
             }
         }
 
-        private BackupMetadata ParseBackupMetadata(string backupFilePath, string originalFileName)
+        private BackupMetadata ParseBackupMetadata(string backupFilePath)
         {
             try
             {
@@ -575,34 +551,31 @@ namespace D2RSaveMonitor
                     return null;
                 }
 
-                // Parse timestamp from filename
-                // 압축: {name}_{yyyyMMdd_HHmmss}.d2s.zip
-                // 비압축: {name}_{yyyyMMdd_HHmmss}.d2s
-                string fileNameWithoutExt;
-                if (isCompressed)
+                string coreName = isCompressed
+                    ? fileName.Substring(0, fileName.Length - 4) // ".zip" 제거
+                    : fileName;
+
+                if (!coreName.EndsWith(".d2s", StringComparison.OrdinalIgnoreCase))
                 {
-                    fileNameWithoutExt = fileName.Substring(0, fileName.Length - 8); // ".d2s.zip" 제거
-                }
-                else
-                {
-                    fileNameWithoutExt = fileName.Substring(0, fileName.Length - 4); // ".d2s" 제거
+                    return null;
                 }
 
-                // 마지막 언더스코어 찾기 (시간 부분 분리)
-                var lastUnderscoreIndex = fileNameWithoutExt.LastIndexOf('_');
+                string nameWithoutExt = coreName.Substring(0, coreName.Length - 4);
+
+                int lastUnderscoreIndex = nameWithoutExt.LastIndexOf('_');
                 if (lastUnderscoreIndex < 0) return null;
 
-                var timePart = fileNameWithoutExt.Substring(lastUnderscoreIndex + 1); // "082801"
-                var remaining = fileNameWithoutExt.Substring(0, lastUnderscoreIndex); // "Amazon.d2s_20251002"
+                string timePart = nameWithoutExt.Substring(lastUnderscoreIndex + 1);
+                string remaining = nameWithoutExt.Substring(0, lastUnderscoreIndex);
 
-                // 그 다음 언더스코어 찾기 (날짜 부분 분리)
-                var secondLastUnderscoreIndex = remaining.LastIndexOf('_');
+                int secondLastUnderscoreIndex = remaining.LastIndexOf('_');
                 if (secondLastUnderscoreIndex < 0) return null;
 
-                var datePart = remaining.Substring(secondLastUnderscoreIndex + 1); // "20251002"
+                string datePart = remaining.Substring(secondLastUnderscoreIndex + 1);
+                string baseName = remaining.Substring(0, secondLastUnderscoreIndex) + ".d2s";
 
-                // 타임스탬프 파싱
-                if (datePart.Length != 8 || timePart.Length != 6) return null;
+                if (datePart.Length != 8) return null;
+                if (timePart.Length != 6 && timePart.Length != 9) return null;
 
                 var year = int.Parse(datePart.Substring(0, 4));
                 var month = int.Parse(datePart.Substring(4, 2));
@@ -610,13 +583,13 @@ namespace D2RSaveMonitor
                 var hour = int.Parse(timePart.Substring(0, 2));
                 var minute = int.Parse(timePart.Substring(2, 2));
                 var second = int.Parse(timePart.Substring(4, 2));
+                int millisecond = timePart.Length > 6 ? int.Parse(timePart.Substring(6)) : 0;
 
-                var timestamp = new DateTime(year, month, day, hour, minute, second);
+                var timestamp = new DateTime(year, month, day, hour, minute, second, millisecond);
 
                 long compressedSize = fileInfo.Length;
                 long originalSize = compressedSize;
 
-                // 압축 파일인 경우 원본 크기 확인
                 if (isCompressed)
                 {
                     try
@@ -633,17 +606,16 @@ namespace D2RSaveMonitor
                     }
                     catch
                     {
-                        // 원본 크기를 알 수 없으면 압축 크기 사용
                         originalSize = compressedSize;
                     }
                 }
 
                 return new BackupMetadata
                 {
-                    OriginalFile = originalFileName,
+                    OriginalFile = baseName,
                     BackupFile = fileName,
                     Timestamp = timestamp,
-                    FileSize = originalSize,  // 원본 파일 크기
+                    FileSize = originalSize,
                     Status = BackupStatus.Valid,
                     IsCompressed = isCompressed,
                     CompressedSize = compressedSize,

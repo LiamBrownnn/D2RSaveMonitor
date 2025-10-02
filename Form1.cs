@@ -484,13 +484,28 @@ namespace D2RSaveMonitor
             {
                 if (!backupSettings.PeriodicBackupEnabled) return;
 
-                var files = Directory.GetFiles(savePath, "*.d2s")
-                    .Where(f => new FileInfo(f).Length >= FileConstants.WarningThreshold)
+                var candidates = Directory.GetFiles(savePath, "*.d2s")
+                    .Select(filePath => new FileInfo(filePath))
+                    .Where(info => info.Exists)
+                    .Where(info =>
+                    {
+                        switch (backupSettings.PeriodicScope)
+                        {
+                            case PeriodicBackupScope.DangerOnly:
+                                return info.Length >= FileConstants.DangerThreshold;
+                            case PeriodicBackupScope.WarningOrAbove:
+                                return info.Length >= FileConstants.WarningThreshold;
+                            case PeriodicBackupScope.EntireRange:
+                            default:
+                                return info.Length > 0;
+                        }
+                    })
+                    .Select(info => info.FullName)
                     .ToList();
 
-                if (files.Any())
+                if (candidates.Any())
                 {
-                    await backupManager.CreateBulkBackupAsync(files, BackupTrigger.PeriodicAutomatic);
+                    await backupManager.CreateBulkBackupAsync(candidates, BackupTrigger.PeriodicAutomatic);
                 }
             }
             catch (Exception ex)
@@ -507,26 +522,60 @@ namespace D2RSaveMonitor
                 return;
             }
 
-            string autoBackupText = backupSettings.AutoBackupOnDanger
-                ? LanguageManager.GetString("Enabled")
-                : LanguageManager.GetString("Disabled");
+            string autoBackupLine = backupSettings.AutoBackupOnDanger
+                ? LanguageManager.GetString("AutoBackupDangerOn")
+                : LanguageManager.GetString("AutoBackupDangerOff");
 
-            string status = $"{LanguageManager.GetString("AutoBackup")}: {autoBackupText}";
-
+            string periodicLine;
             if (backupSettings.PeriodicBackupEnabled)
             {
                 string everyMinutes = LanguageManager.CurrentLanguage == Language.Korean
-                    ? $"{backupSettings.PeriodicIntervalMinutes}분마다"
-                    : $"Every {backupSettings.PeriodicIntervalMinutes} min";
-                status += $" | {LanguageManager.GetString("PeriodicBackup")}: {everyMinutes}";
+                    ? $"{backupSettings.PeriodicIntervalMinutes}분"
+                    : $"{backupSettings.PeriodicIntervalMinutes} min";
+                string rangeKey = GetPeriodicRangeKey(backupSettings.PeriodicScope);
+                string scopeText = LanguageManager.GetString(rangeKey);
+                periodicLine = string.Format(
+                    LanguageManager.GetString("PeriodicBackupOnSummary"),
+                    everyMinutes,
+                    scopeText
+                );
             }
             else
             {
-                status += $" | {LanguageManager.GetString("PeriodicBackup")}: {LanguageManager.GetString("Disabled")}";
+                periodicLine = LanguageManager.GetString("PeriodicBackupOffSummary");
             }
 
-            lblBackupStatus.Text = status;
+            var lines = new List<string>
+            {
+                autoBackupLine,
+                periodicLine
+            };
+
+            string backupLocation = backupManager != null
+                ? backupManager.BackupDirectory
+                : (!string.IsNullOrWhiteSpace(savePath) ? Path.Combine(savePath, "Backups") : string.Empty);
+
+            if (!string.IsNullOrWhiteSpace(backupLocation))
+            {
+                lines.Add(string.Format(LanguageManager.GetString("BackupLocationInfo"), backupLocation));
+            }
+
+            lblBackupStatus.Text = string.Join(Environment.NewLine, lines);
         }
+
+        private string GetPeriodicRangeKey(PeriodicBackupScope scope)
+        {
+            switch (scope)
+            {
+                case PeriodicBackupScope.DangerOnly:
+                    return "PeriodicRangeDanger";
+                case PeriodicBackupScope.EntireRange:
+                    return "PeriodicRangeAll";
+                default:
+                    return "PeriodicRangeWarning";
+            }
+        }
+
 
         private void OnBackupStarted(object sender, BackupEventArgs e)
         {
@@ -1467,14 +1516,16 @@ namespace D2RSaveMonitor
             {
                 e.Paint(e.CellBounds, DataGridViewPaintParts.All & ~DataGridViewPaintParts.ContentForeground);
 
-                double percentage = Convert.ToDouble(e.Value);
-                int barWidth = (int)(e.CellBounds.Width * percentage / 100);
+                double percentage = Math.Max(0, Convert.ToDouble(e.Value));
+                int availableWidth = Math.Max(0, e.CellBounds.Width - 4);
+                int barWidth = (int)Math.Round(availableWidth * percentage / 100.0);
+                barWidth = Math.Min(availableWidth, Math.Max(0, barWidth));
 
                 // 진행바 배경
                 using (SolidBrush bgBrush = new SolidBrush(Color.LightGray))
                 {
                     e.Graphics.FillRectangle(bgBrush, e.CellBounds.X + 2, e.CellBounds.Y + 2,
-                        e.CellBounds.Width - 4, e.CellBounds.Height - 4);
+                        availableWidth, e.CellBounds.Height - 4);
                 }
 
                 // 진행바 색상 결정
@@ -1489,10 +1540,13 @@ namespace D2RSaveMonitor
                 }
 
                 // 진행바 그리기
-                using (SolidBrush barBrush = new SolidBrush(barColor))
+                if (barWidth > 0)
                 {
-                    e.Graphics.FillRectangle(barBrush, e.CellBounds.X + 2, e.CellBounds.Y + 2,
-                        barWidth - 4, e.CellBounds.Height - 4);
+                    using (SolidBrush barBrush = new SolidBrush(barColor))
+                    {
+                        e.Graphics.FillRectangle(barBrush, e.CellBounds.X + 2, e.CellBounds.Y + 2,
+                            barWidth, e.CellBounds.Height - 4);
+                    }
                 }
 
                 // 텍스트 그리기
@@ -1835,6 +1889,16 @@ namespace D2RSaveMonitor
     }
 
     /// <summary>
+    /// Periodic backup scope
+    /// </summary>
+    public enum PeriodicBackupScope
+    {
+        DangerOnly = 0,
+        WarningOrAbove = 1,
+        EntireRange = 2
+    }
+
+    /// <summary>
     /// Backup validation status
     /// </summary>
     public enum BackupStatus
@@ -1852,6 +1916,7 @@ namespace D2RSaveMonitor
     {
         public bool AutoBackupOnDanger { get; set; } = true;
         public bool PeriodicBackupEnabled { get; set; } = false;
+        public PeriodicBackupScope PeriodicScope { get; set; } = PeriodicBackupScope.EntireRange;
         public int PeriodicIntervalMinutes { get; set; } = 30;
         public int MaxBackupsPerFile { get; set; } = 10;
         public int BackupCooldownSeconds { get; set; } = 60;
@@ -1876,7 +1941,8 @@ namespace D2RSaveMonitor
                         MaxBackupsPerFile = (int)key.GetValue("MaxBackups", 10),
                         BackupCooldownSeconds = (int)key.GetValue("CooldownSeconds", 60),
                         CustomBackupPath = (string)key.GetValue("CustomPath", ""),
-                        EnableCompression = (int)key.GetValue("EnableCompression", 1) == 1
+                        EnableCompression = (int)key.GetValue("EnableCompression", 1) == 1,
+                        PeriodicScope = LoadPeriodicScope(key)
                     };
                 }
             }
@@ -1884,6 +1950,18 @@ namespace D2RSaveMonitor
             {
                 return new BackupSettings();
             }
+        }
+
+        private static PeriodicBackupScope LoadPeriodicScope(RegistryKey key)
+        {
+            int scopeValue = (int)key.GetValue("PeriodicScope", -1);
+            if (Enum.IsDefined(typeof(PeriodicBackupScope), scopeValue))
+            {
+                return (PeriodicBackupScope)scopeValue;
+            }
+
+            bool includeSafeZone = (int)key.GetValue("PeriodicIncludeSafeZone", 0) == 1;
+            return includeSafeZone ? PeriodicBackupScope.EntireRange : PeriodicBackupScope.WarningOrAbove;
         }
 
         public void SaveToRegistry()
@@ -1901,6 +1979,8 @@ namespace D2RSaveMonitor
                     key.SetValue("CooldownSeconds", BackupCooldownSeconds);
                     key.SetValue("CustomPath", CustomBackupPath ?? "");
                     key.SetValue("EnableCompression", EnableCompression ? 1 : 0);
+                    key.SetValue("PeriodicScope", (int)PeriodicScope);
+                    key.SetValue("PeriodicIncludeSafeZone", PeriodicScope == PeriodicBackupScope.EntireRange ? 1 : 0);
                 }
             }
             catch
@@ -2245,14 +2325,18 @@ namespace D2RSaveMonitor
             ["Delete"] = "삭제",
             ["BackupInfoPlaceholder"] = "백업을 선택하면 상세 정보가 표시됩니다.",
             ["SelectedBackup"] = "선택된 백업:",
+            ["SelectedBackupInfo"] = "선택된 백업:\n캐릭터: {0}\n백업 파일: {1}\n크기: {2} bytes ({3:F1}%)",
+            ["SelectedBackupCount"] = "선택된 백업: {0}개",
             ["Compressed"] = "압축",
             ["Automatic"] = "자동",
             ["Manual"] = "수동",
+            ["RestoreWithCount"] = "복원 ({0}개)",
+            ["DeleteWithCount"] = "삭제 ({0}개)",
 
             // 메시지
             ["SelectSaveFolder"] = "D2R 세이브 파일 폴더를 선택하세요",
             ["LoadingBackups"] = "백업 목록 로딩 중...",
-            ["BackupLoadFailed"] = "백업 목록 로드 실패",
+            ["BackupLoadFailed"] = "백업 목록 로드 실패:\n{0}",
             ["RestoreOnlyOne"] = "복원은 한 번에 하나의 백업만 가능합니다.\n첫 번째 선택된 백업만 복원됩니다.",
             ["Notice"] = "알림",
             ["RestoreConfirm"] = "다음 백업으로 복원하시겠습니까?\n\n캐릭터: {0}\n백업 시간: {1}\n파일 크기: {2} bytes\n\n현재 파일은 자동으로 백업됩니다.",
@@ -2269,12 +2353,23 @@ namespace D2RSaveMonitor
             ["DeleteSuccessTitle"] = "삭제 완료",
             ["DeleteFailed"] = "백업 삭제에 실패했습니다.",
             ["DeletePartialSuccess"] = "삭제 완료: {0}개 성공, {1}개 실패",
+            ["DeleteMultipleSuccess"] = "삭제 완료: {0}개 백업 삭제",
+            ["DeletePartialTitle"] = "삭제 완료 (일부 실패)",
+            ["DeleteFailedTitle"] = "삭제 실패",
+            ["DeleteFailedWithReason"] = "백업 삭제에 실패했습니다.\n오류: {0}",
+            ["RefreshFailed"] = "새로고침 중 오류 발생:\n{0}",
 
             // 백업 트리거
             ["TriggerDanger"] = "위험 수준 도달",
             ["TriggerPeriodic"] = "주기적 자동",
             ["TriggerManual"] = "수동",
+            ["TriggerManualSingle"] = "수동 백업 (단일)",
+            ["TriggerManualBulk"] = "수동 백업 (전체)",
             ["TriggerPreRestore"] = "복원 전",
+            ["CompressionRatioFormat"] = "압축 {0:F0}%",
+            ["CompressionNotAvailable"] = "-",
+            ["NoBackups"] = "백업이 없습니다.",
+            ["Unknown"] = "알 수 없음",
 
             // 언어 설정
             ["Language"] = "언어 / Language",
@@ -2302,7 +2397,15 @@ namespace D2RSaveMonitor
             ["LblLastBackup"] = "마지막 백업",
             ["None"] = "없음",
             ["AutoBackup"] = "자동 백업",
+            ["AutoBackupDangerOn"] = "위험 수준 도달 시 자동 백업: 사용",
+            ["AutoBackupDangerOff"] = "위험 수준 자동 백업: 사용 안 함",
             ["PeriodicBackup"] = "주기적 백업",
+            ["PeriodicBackupOnSummary"] = "주기 백업: {0} 간격 | 범위: {1}",
+            ["PeriodicBackupOffSummary"] = "주기 백업: 사용 안 함",
+            ["BackupLocationInfo"] = "백업 위치: {0}",
+            ["PeriodicRangeDanger"] = "위험 구간",
+            ["PeriodicRangeWarning"] = "경고 이상",
+            ["PeriodicRangeAll"] = "전체 구간",
             ["Enabled"] = "활성화",
             ["Disabled"] = "비활성화",
             ["StatusMonitoring"] = "모니터링 대기 중...",
@@ -2371,14 +2474,18 @@ namespace D2RSaveMonitor
             ["Delete"] = "Delete",
             ["BackupInfoPlaceholder"] = "Select a backup to view details.",
             ["SelectedBackup"] = "Selected backup:",
+            ["SelectedBackupInfo"] = "Selected backup:\nCharacter: {0}\nBackup file: {1}\nSize: {2} bytes ({3:F1}%)",
+            ["SelectedBackupCount"] = "Selected backups: {0}",
             ["Compressed"] = "Compressed",
             ["Automatic"] = "Auto",
             ["Manual"] = "Manual",
+            ["RestoreWithCount"] = "Restore ({0})",
+            ["DeleteWithCount"] = "Delete ({0})",
 
             // Messages
             ["SelectSaveFolder"] = "Select D2R save file folder",
             ["LoadingBackups"] = "Loading backups...",
-            ["BackupLoadFailed"] = "Failed to load backup list",
+            ["BackupLoadFailed"] = "Failed to load backup list:\n{0}",
             ["RestoreOnlyOne"] = "Only one backup can be restored at a time.\nOnly the first selected backup will be restored.",
             ["Notice"] = "Notice",
             ["RestoreConfirm"] = "Restore from this backup?\n\nCharacter: {0}\nBackup time: {1}\nFile size: {2} bytes\n\nCurrent file will be backed up automatically.",
@@ -2395,12 +2502,23 @@ namespace D2RSaveMonitor
             ["DeleteSuccessTitle"] = "Delete Successful",
             ["DeleteFailed"] = "Failed to delete backup.",
             ["DeletePartialSuccess"] = "Delete complete: {0} succeeded, {1} failed",
+            ["DeleteMultipleSuccess"] = "Delete complete: {0} backups removed",
+            ["DeletePartialTitle"] = "Delete Complete (Partial)",
+            ["DeleteFailedTitle"] = "Delete Failed",
+            ["DeleteFailedWithReason"] = "Failed to delete backup.\nError: {0}",
+            ["RefreshFailed"] = "Error while refreshing:\n{0}",
 
             // Backup Triggers
             ["TriggerDanger"] = "Danger Level",
             ["TriggerPeriodic"] = "Periodic Auto",
             ["TriggerManual"] = "Manual",
+            ["TriggerManualSingle"] = "Manual backup (single)",
+            ["TriggerManualBulk"] = "Manual backup (bulk)",
             ["TriggerPreRestore"] = "Pre-Restore",
+            ["CompressionRatioFormat"] = "Compressed {0:F0}%",
+            ["CompressionNotAvailable"] = "-",
+            ["NoBackups"] = "No backups found.",
+            ["Unknown"] = "Unknown",
 
             // Language Settings
             ["Language"] = "Language / 언어",
@@ -2428,7 +2546,15 @@ namespace D2RSaveMonitor
             ["LblLastBackup"] = "Last backup",
             ["None"] = "None",
             ["AutoBackup"] = "Auto backup",
+            ["AutoBackupDangerOn"] = "Auto-backup at danger threshold: Enabled",
+            ["AutoBackupDangerOff"] = "Auto-backup at danger threshold: Disabled",
             ["PeriodicBackup"] = "Periodic backup",
+            ["PeriodicBackupOnSummary"] = "Periodic backup: every {0} | Scope: {1}",
+            ["PeriodicBackupOffSummary"] = "Periodic backup: Disabled",
+            ["BackupLocationInfo"] = "Backup location: {0}",
+            ["PeriodicRangeDanger"] = "Danger only",
+            ["PeriodicRangeWarning"] = "Warning or higher",
+            ["PeriodicRangeAll"] = "Entire range",
             ["Enabled"] = "Enabled",
             ["Disabled"] = "Disabled",
             ["StatusMonitoring"] = "Monitoring...",
