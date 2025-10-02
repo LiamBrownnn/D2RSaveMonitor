@@ -250,7 +250,9 @@ namespace D2RSaveMonitor
                 MultiSelect = true,  // Ctrl 키로 여러 파일 선택 가능
                 RowHeadersVisible = false,
                 AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill,
-                AllowUserToResizeColumns = false  // 컬럼 크기 조절 금지
+                AllowUserToResizeColumns = false,  // 컬럼 너비 조절 금지 (가로)
+                AllowUserToResizeRows = false,  // 행 높이 조절 금지 (세로)
+                ColumnHeadersHeightSizeMode = DataGridViewColumnHeadersHeightSizeMode.DisableResizing  // 헤더 높이 고정
             };
             dgvFiles.CellPainting += DgvFiles_CellPainting;
             dgvFiles.SelectionChanged += DgvFiles_SelectionChanged;
@@ -1735,6 +1737,7 @@ namespace D2RSaveMonitor
         public int MaxBackupsPerFile { get; set; } = 10;
         public int BackupCooldownSeconds { get; set; } = 60;
         public string CustomBackupPath { get; set; }
+        public bool EnableCompression { get; set; } = true;  // 백업 압축 활성화 (기본: 활성화)
 
         private const string BackupRegistryKey = @"Software\D2RMonitor\Backup";
 
@@ -1753,7 +1756,8 @@ namespace D2RSaveMonitor
                         PeriodicIntervalMinutes = (int)key.GetValue("PeriodicInterval", 30),
                         MaxBackupsPerFile = (int)key.GetValue("MaxBackups", 10),
                         BackupCooldownSeconds = (int)key.GetValue("CooldownSeconds", 60),
-                        CustomBackupPath = (string)key.GetValue("CustomPath", "")
+                        CustomBackupPath = (string)key.GetValue("CustomPath", ""),
+                        EnableCompression = (int)key.GetValue("EnableCompression", 1) == 1
                     };
                 }
             }
@@ -1777,6 +1781,7 @@ namespace D2RSaveMonitor
                     key.SetValue("MaxBackups", MaxBackupsPerFile);
                     key.SetValue("CooldownSeconds", BackupCooldownSeconds);
                     key.SetValue("CustomPath", CustomBackupPath ?? "");
+                    key.SetValue("EnableCompression", EnableCompression ? 1 : 0);
                 }
             }
             catch
@@ -1798,10 +1803,19 @@ namespace D2RSaveMonitor
         public BackupTrigger TriggerReason { get; set; }
         public bool IsAutomatic { get; set; }
         public BackupStatus Status { get; set; }
+        public bool IsCompressed { get; set; }  // 압축 여부
+        public long CompressedSize { get; set; }  // 압축된 파일 크기
+        public long OriginalSize { get; set; }  // 원본 파일 크기
 
         public string GetDisplayName()
         {
             return $"{Path.GetFileNameWithoutExtension(OriginalFile)} - {Timestamp:yyyy-MM-dd HH:mm:ss}";
+        }
+
+        public double GetCompressionRatio()
+        {
+            if (!IsCompressed || OriginalSize == 0) return 0;
+            return (1 - ((double)CompressedSize / OriginalSize)) * 100;
         }
     }
 
