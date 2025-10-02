@@ -105,7 +105,9 @@ namespace D2RSaveMonitor
                 MultiSelect = true,  // Ctrl 키로 여러 백업 선택 가능
                 RowHeadersVisible = false,
                 AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill,
-                AllowUserToResizeColumns = false  // 컬럼 크기 조절 금지
+                AllowUserToResizeColumns = false,  // 컬럼 너비 조절 금지 (가로)
+                AllowUserToResizeRows = false,  // 행 높이 조절 금지 (세로)
+                ColumnHeadersHeightSizeMode = DataGridViewColumnHeadersHeightSizeMode.DisableResizing  // 헤더 높이 고정
             };
             dgvBackups.SelectionChanged += DgvBackups_SelectionChanged;
             Controls.Add(dgvBackups);
@@ -114,13 +116,15 @@ namespace D2RSaveMonitor
             dgvBackups.Columns.Add("Timestamp", "백업 시간");
             dgvBackups.Columns.Add("Character", "캐릭터");
             dgvBackups.Columns.Add("Size", "파일 크기");
+            dgvBackups.Columns.Add("Compression", "압축");
             dgvBackups.Columns.Add("Trigger", "백업 원인");
             dgvBackups.Columns.Add("Type", "유형");
 
-            dgvBackups.Columns["Timestamp"].Width = 180;
-            dgvBackups.Columns["Character"].Width = 180;
-            dgvBackups.Columns["Size"].Width = 120;
-            dgvBackups.Columns["Trigger"].Width = 150;
+            dgvBackups.Columns["Timestamp"].Width = 150;
+            dgvBackups.Columns["Character"].Width = 150;
+            dgvBackups.Columns["Size"].Width = 100;
+            dgvBackups.Columns["Compression"].Width = 100;
+            dgvBackups.Columns["Trigger"].Width = 120;
             dgvBackups.Columns["Type"].Width = 100;
 
             // Backup info label
@@ -300,11 +304,24 @@ namespace D2RSaveMonitor
                         string trigger = GetTriggerDisplayName(backup.TriggerReason);
                         string type = backup.IsAutomatic ? "자동" : "수동";
 
+                        // 압축 정보 생성
+                        string compressionInfo;
+                        if (backup.IsCompressed)
+                        {
+                            double ratio = backup.GetCompressionRatio();
+                            compressionInfo = $"압축 {ratio:F0}%";
+                        }
+                        else
+                        {
+                            compressionInfo = "-";
+                        }
+
                         var row = dgvBackups.Rows[i];
                         row.SetValues(
                             backup.Timestamp.ToString("yyyy-MM-dd HH:mm:ss"),
                             Path.GetFileNameWithoutExtension(backup.OriginalFile),
                             $"{backup.FileSize} bytes",
+                            compressionInfo,
                             trigger,
                             type
                         );
