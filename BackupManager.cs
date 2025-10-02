@@ -425,18 +425,30 @@ namespace D2RSaveMonitor
                 var fileName = fileInfo.Name;
 
                 // Parse timestamp from filename: {name}_{yyyyMMdd_HHmmss}.d2s
-                var underscoreIndex = fileName.LastIndexOf('_');
-                if (underscoreIndex < 0) return null;
+                // 예: Amazon.d2s_20251002_082801.d2s
 
-                var timestampPart = fileName.Substring(underscoreIndex + 1);
-                timestampPart = timestampPart.Replace(".d2s", "");
+                // 1. .d2s 확장자 제거
+                if (!fileName.EndsWith(".d2s", StringComparison.OrdinalIgnoreCase))
+                {
+                    return null;
+                }
 
-                var parts = timestampPart.Split('_');
-                if (parts.Length != 2) return null;
+                var fileNameWithoutExt = fileName.Substring(0, fileName.Length - 4); // "Amazon.d2s_20251002_082801"
 
-                var datePart = parts[0]; // yyyyMMdd
-                var timePart = parts[1]; // HHmmss
+                // 2. 마지막 언더스코어 찾기 (시간 부분 분리)
+                var lastUnderscoreIndex = fileNameWithoutExt.LastIndexOf('_');
+                if (lastUnderscoreIndex < 0) return null;
 
+                var timePart = fileNameWithoutExt.Substring(lastUnderscoreIndex + 1); // "082801"
+                var remaining = fileNameWithoutExt.Substring(0, lastUnderscoreIndex); // "Amazon.d2s_20251002"
+
+                // 3. 그 다음 언더스코어 찾기 (날짜 부분 분리)
+                var secondLastUnderscoreIndex = remaining.LastIndexOf('_');
+                if (secondLastUnderscoreIndex < 0) return null;
+
+                var datePart = remaining.Substring(secondLastUnderscoreIndex + 1); // "20251002"
+
+                // 4. 타임스탬프 파싱
                 if (datePart.Length != 8 || timePart.Length != 6) return null;
 
                 var year = int.Parse(datePart.Substring(0, 4));
