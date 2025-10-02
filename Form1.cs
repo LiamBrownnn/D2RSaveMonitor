@@ -128,6 +128,8 @@ namespace D2RSaveMonitor
         // UI Controls
         private TextBox txtSavePath;
         private Button btnBrowse;
+        private Button btnOpenSaveFolder;
+        private Button btnOpenBackupFolder;
         private DataGridView dgvFiles;
         private Label lblStatus;
 
@@ -178,10 +180,38 @@ namespace D2RSaveMonitor
             txtSavePath = new TextBox
             {
                 Location = new Point(130, 12),
-                Size = new Size(530, 25),
+                Size = new Size(400, 25),
                 ReadOnly = true
             };
             Controls.Add(txtSavePath);
+
+            // ToolTip 설정
+            ToolTip toolTip = new ToolTip();
+            toolTip.AutoPopDelay = 5000;
+            toolTip.InitialDelay = 500;
+            toolTip.ReshowDelay = 100;
+
+            // 세이브 폴더 열기 버튼
+            btnOpenSaveFolder = new Button
+            {
+                Text = "📁 세이브",
+                Location = new Point(540, 10),
+                Size = new Size(80, 28)
+            };
+            btnOpenSaveFolder.Click += BtnOpenSaveFolder_Click;
+            toolTip.SetToolTip(btnOpenSaveFolder, "세이브 폴더 열기");
+            Controls.Add(btnOpenSaveFolder);
+
+            // 백업 폴더 열기 버튼
+            btnOpenBackupFolder = new Button
+            {
+                Text = "📁 백업",
+                Location = new Point(625, 10),
+                Size = new Size(80, 28)
+            };
+            btnOpenBackupFolder.Click += BtnOpenBackupFolder_Click;
+            toolTip.SetToolTip(btnOpenBackupFolder, "백업 폴더 열기");
+            Controls.Add(btnOpenBackupFolder);
 
             // 찾아보기 버튼
             btnBrowse = new Button
@@ -217,9 +247,10 @@ namespace D2RSaveMonitor
                 AllowUserToDeleteRows = false,
                 ReadOnly = true,
                 SelectionMode = DataGridViewSelectionMode.FullRowSelect,
-                MultiSelect = false,
+                MultiSelect = true,  // Ctrl 키로 여러 파일 선택 가능
                 RowHeadersVisible = false,
-                AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill
+                AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill,
+                AllowUserToResizeColumns = false  // 컬럼 크기 조절 금지
             };
             dgvFiles.CellPainting += DgvFiles_CellPainting;
             dgvFiles.SelectionChanged += DgvFiles_SelectionChanged;
@@ -787,10 +818,109 @@ namespace D2RSaveMonitor
             }
         }
 
+        private void BtnOpenSaveFolder_Click(object sender, EventArgs e)
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(savePath))
+                {
+                    MessageBox.Show(
+                        "세이브 경로가 설정되지 않았습니다.",
+                        "알림",
+                        MessageBoxButtons.OK,
+                        MessageBoxIcon.Information
+                    );
+                    return;
+                }
+
+                if (!Directory.Exists(savePath))
+                {
+                    MessageBox.Show(
+                        $"세이브 폴더를 찾을 수 없습니다:\n{savePath}",
+                        "오류",
+                        MessageBoxButtons.OK,
+                        MessageBoxIcon.Error
+                    );
+                    return;
+                }
+
+                // 탐색기로 폴더 열기
+                System.Diagnostics.Process.Start("explorer.exe", savePath);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(
+                    $"폴더를 열 수 없습니다:\n{ex.Message}",
+                    "오류",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Error
+                );
+                LogError("세이브 폴더 열기 실패", ex);
+            }
+        }
+
+        private void BtnOpenBackupFolder_Click(object sender, EventArgs e)
+        {
+            try
+            {
+                if (backupManager == null)
+                {
+                    MessageBox.Show(
+                        "백업 시스템이 초기화되지 않았습니다.",
+                        "알림",
+                        MessageBoxButtons.OK,
+                        MessageBoxIcon.Information
+                    );
+                    return;
+                }
+
+                // BackupManager에서 백업 폴더 경로 가져오기
+                string backupDirectory;
+                if (!string.IsNullOrEmpty(backupSettings?.CustomBackupPath))
+                {
+                    backupDirectory = backupSettings.CustomBackupPath;
+                }
+                else
+                {
+                    backupDirectory = Path.Combine(savePath, "Backups");
+                }
+
+                // 백업 폴더가 없으면 생성
+                if (!Directory.Exists(backupDirectory))
+                {
+                    Directory.CreateDirectory(backupDirectory);
+                }
+
+                // 탐색기로 폴더 열기
+                System.Diagnostics.Process.Start("explorer.exe", backupDirectory);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(
+                    $"백업 폴더를 열 수 없습니다:\n{ex.Message}",
+                    "오류",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Error
+                );
+                LogError("백업 폴더 열기 실패", ex);
+            }
+        }
+
         private void DgvFiles_SelectionChanged(object sender, EventArgs e)
         {
             // Enable/disable backup selected button based on selection
-            btnBackupSelected.Enabled = dgvFiles.SelectedRows.Count > 0;
+            int selectedCount = dgvFiles.SelectedRows.Count;
+            btnBackupSelected.Enabled = selectedCount > 0;
+
+            // 버튼 텍스트 업데이트 (선택된 개수 표시)
+            if (selectedCount > 1)
+            {
+                btnBackupSelected.Text = $"선택 파일 백업 ({selectedCount}개)";
+            }
+            else
+            {
+                btnBackupSelected.Text = "선택 파일 백업";
+            }
         }
 
         private async void BtnBackupSelected_Click(object sender, EventArgs e)
@@ -802,28 +932,68 @@ namespace D2RSaveMonitor
                 btnBackupSelected.Enabled = false;
                 btnBackupAll.Enabled = false;
 
-                var selectedRow = dgvFiles.SelectedRows[0];
-                string fileName = selectedRow.Cells["FileName"].Value.ToString();
-                string fullPath = Path.Combine(savePath, fileName);
-
-                var result = await backupManager.CreateBackupAsync(fullPath, BackupTrigger.ManualSingle);
-
-                if (result.Success)
+                // 선택된 모든 파일 경로 수집
+                var selectedFiles = new List<string>();
+                foreach (DataGridViewRow row in dgvFiles.SelectedRows)
                 {
-                    MessageBox.Show(
-                        $"백업 완료: {fileName}\n백업 시간: {result.Duration.TotalMilliseconds:F0}ms",
-                        "백업 성공",
-                        MessageBoxButtons.OK,
-                        MessageBoxIcon.Information
-                    );
+                    string fileName = row.Cells["FileName"].Value.ToString();
+                    string fullPath = Path.Combine(savePath, fileName);
+                    selectedFiles.Add(fullPath);
                 }
+
+                // 단일 파일인 경우
+                if (selectedFiles.Count == 1)
+                {
+                    var result = await backupManager.CreateBackupAsync(selectedFiles[0], BackupTrigger.ManualSingle);
+
+                    if (result.Success)
+                    {
+                        MessageBox.Show(
+                            $"백업 완료: {Path.GetFileName(selectedFiles[0])}\n백업 시간: {result.Duration.TotalMilliseconds:F0}ms",
+                            "백업 성공",
+                            MessageBoxButtons.OK,
+                            MessageBoxIcon.Information
+                        );
+                    }
+                    else
+                    {
+                        MessageBox.Show(
+                            $"백업 실패: {Path.GetFileName(selectedFiles[0])}\n오류: {result.ErrorMessage}",
+                            "백업 실패",
+                            MessageBoxButtons.OK,
+                            MessageBoxIcon.Error
+                        );
+                    }
+                }
+                // 여러 파일인 경우
                 else
                 {
+                    var confirmResult = MessageBox.Show(
+                        $"{selectedFiles.Count}개의 파일을 백업하시겠습니까?",
+                        "선택 파일 백업 확인",
+                        MessageBoxButtons.YesNo,
+                        MessageBoxIcon.Question
+                    );
+
+                    if (confirmResult != DialogResult.Yes) return;
+
+                    // 벌크 백업 실행
+                    var results = await backupManager.CreateBulkBackupAsync(selectedFiles, BackupTrigger.ManualBulk);
+
+                    int successCount = results.Count(r => r.Success);
+                    int failCount = results.Count(r => !r.Success);
+
+                    string message = $"백업 완료: {successCount}개 성공";
+                    if (failCount > 0)
+                    {
+                        message += $", {failCount}개 실패";
+                    }
+
                     MessageBox.Show(
-                        $"백업 실패: {fileName}\n오류: {result.ErrorMessage}",
-                        "백업 실패",
+                        message,
+                        "선택 파일 백업 완료",
                         MessageBoxButtons.OK,
-                        MessageBoxIcon.Error
+                        failCount > 0 ? MessageBoxIcon.Warning : MessageBoxIcon.Information
                     );
                 }
             }
