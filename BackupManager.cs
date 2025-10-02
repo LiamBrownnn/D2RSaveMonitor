@@ -2,6 +2,7 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
+using System.IO.Compression;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -196,14 +197,35 @@ namespace D2RSaveMonitor
         {
             try
             {
-                var backups = Directory.GetFiles(backupDirectory, "*.d2s")
+                // .d2s와 .d2s.zip 파일 모두 검색
+                var d2sFiles = Directory.GetFiles(backupDirectory, "*.d2s");
+                var zipFiles = Directory.GetFiles(backupDirectory, "*.d2s.zip");
+                var allBackupFiles = d2sFiles.Concat(zipFiles);
+
+                var backups = allBackupFiles
                     .Select(backupFile =>
                     {
                         var fileName = Path.GetFileName(backupFile);
-                        var underscoreIndex = fileName.LastIndexOf('_');
+
+                        // .d2s.zip 또는 .d2s 확장자 제거
+                        string fileNameWithoutExt;
+                        if (fileName.EndsWith(".d2s.zip", StringComparison.OrdinalIgnoreCase))
+                        {
+                            fileNameWithoutExt = fileName.Substring(0, fileName.Length - 8); // ".d2s.zip" 제거
+                        }
+                        else if (fileName.EndsWith(".d2s", StringComparison.OrdinalIgnoreCase))
+                        {
+                            fileNameWithoutExt = fileName.Substring(0, fileName.Length - 4); // ".d2s" 제거
+                        }
+                        else
+                        {
+                            return null;
+                        }
+
+                        var underscoreIndex = fileNameWithoutExt.LastIndexOf('_');
                         if (underscoreIndex < 0) return null;
 
-                        var originalName = fileName.Substring(0, underscoreIndex) + ".d2s";
+                        var originalName = fileNameWithoutExt.Substring(0, underscoreIndex) + ".d2s";
                         return ParseBackupMetadata(backupFile, originalName);
                     })
                     .Where(metadata => metadata != null)
@@ -250,11 +272,19 @@ namespace D2RSaveMonitor
                     }
                 }
 
-                // Copy backup to target location
-                bool copied = await CopyFileWithRetryAsync(backupPath, targetPath, CancellationToken.None);
+                // Restore: 압축 파일이면 압축 해제, 아니면 직접 복사
+                bool restored;
+                if (backup.IsCompressed || backup.BackupFile.EndsWith(".d2s.zip", StringComparison.OrdinalIgnoreCase))
+                {
+                    restored = await ExtractCompressedBackupAsync(backupPath, targetPath, CancellationToken.None);
+                }
+                else
+                {
+                    restored = await CopyFileWithRetryAsync(backupPath, targetPath, CancellationToken.None);
+                }
 
-                result.Success = copied;
-                if (!copied)
+                result.Success = restored;
+                if (!restored)
                 {
                     result.ErrorMessage = "Failed to restore file";
                 }
@@ -271,6 +301,49 @@ namespace D2RSaveMonitor
             {
                 backupLock.Release();
             }
+        }
+
+        private async Task<bool> ExtractCompressedBackupAsync(string zipPath, string targetPath, CancellationToken ct)
+        {
+            int maxRetries = 3;
+            int delayMs = 100;
+
+            for (int i = 0; i < maxRetries; i++)
+            {
+                try
+                {
+                    // ZIP 파일에서 첫 번째 엔트리 추출
+                    using (FileStream zipStream = new FileStream(zipPath, FileMode.Open, FileAccess.Read, FileShare.Read))
+                    using (ZipArchive archive = new ZipArchive(zipStream, ZipArchiveMode.Read))
+                    {
+                        var entry = archive.Entries.FirstOrDefault();
+                        if (entry == null)
+                        {
+                            return false; // ZIP 파일에 엔트리가 없음
+                        }
+
+                        // 대상 파일로 압축 해제
+                        using (Stream entryStream = entry.Open())
+                        using (FileStream targetStream = new FileStream(targetPath, FileMode.Create, FileAccess.Write, FileShare.None))
+                        {
+                            await entryStream.CopyToAsync(targetStream, 81920, ct);
+                        }
+                    }
+
+                    return true;
+                }
+                catch (IOException ex) when (IsFileLocked(ex) && i < maxRetries - 1)
+                {
+                    // Exponential backoff
+                    await Task.Delay(delayMs * (int)Math.Pow(2, i), ct);
+                }
+                catch
+                {
+                    if (i == maxRetries - 1) return false;
+                }
+            }
+
+            return false;
         }
 
         /// <summary>
@@ -318,27 +391,51 @@ namespace D2RSaveMonitor
                 // Get file info
                 var fileInfo = new FileInfo(sourceFile);
                 var fileName = fileInfo.Name;
+                long originalSize = fileInfo.Length;
 
                 // Generate backup filename
                 var timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
-                var backupFileName = $"{fileName}_{timestamp}.d2s";
-                var backupPath = Path.Combine(backupDirectory, backupFileName);
+                bool useCompression = settings.EnableCompression;
 
-                // Copy file
-                bool copied = await CopyFileWithRetryAsync(sourceFile, backupPath, CancellationToken.None);
+                string backupFileName;
+                string backupPath;
+                bool success;
+                long backupFileSize;
 
-                if (copied)
+                if (useCompression)
                 {
+                    // 압축 백업: .d2s.zip 확장자 사용
+                    backupFileName = $"{fileName}_{timestamp}.d2s.zip";
+                    backupPath = Path.Combine(backupDirectory, backupFileName);
+                    success = await CreateCompressedBackupAsync(sourceFile, backupPath, CancellationToken.None);
+                }
+                else
+                {
+                    // 비압축 백업: .d2s 확장자 사용
+                    backupFileName = $"{fileName}_{timestamp}.d2s";
+                    backupPath = Path.Combine(backupDirectory, backupFileName);
+                    success = await CopyFileWithRetryAsync(sourceFile, backupPath, CancellationToken.None);
+                }
+
+                if (success)
+                {
+                    // 백업 파일 크기 확인
+                    var backupFileInfo = new FileInfo(backupPath);
+                    backupFileSize = backupFileInfo.Length;
+
                     // Create metadata
                     result.Metadata = new BackupMetadata
                     {
                         OriginalFile = fileName,
                         BackupFile = backupFileName,
                         Timestamp = DateTime.Now,
-                        FileSize = fileInfo.Length,
+                        FileSize = originalSize,  // 원본 파일 크기
                         TriggerReason = trigger,
                         IsAutomatic = trigger != BackupTrigger.ManualSingle && trigger != BackupTrigger.ManualBulk,
-                        Status = BackupStatus.Valid
+                        Status = BackupStatus.Valid,
+                        IsCompressed = useCompression,
+                        CompressedSize = useCompression ? backupFileSize : originalSize,
+                        OriginalSize = originalSize
                     };
 
                     result.Success = true;
@@ -346,7 +443,7 @@ namespace D2RSaveMonitor
                 else
                 {
                     result.Success = false;
-                    result.ErrorMessage = "Failed to copy file";
+                    result.ErrorMessage = useCompression ? "Failed to compress file" : "Failed to copy file";
                 }
 
                 return result;
@@ -357,6 +454,51 @@ namespace D2RSaveMonitor
                 result.ErrorMessage = ex.Message;
                 return result;
             }
+        }
+
+        private async Task<bool> CreateCompressedBackupAsync(string sourceFile, string zipPath, CancellationToken ct)
+        {
+            int maxRetries = 3;
+            int delayMs = 100;
+
+            for (int i = 0; i < maxRetries; i++)
+            {
+                try
+                {
+                    // ZIP 파일 생성 및 원본 파일 압축
+                    using (FileStream zipStream = new FileStream(zipPath, FileMode.Create, FileAccess.Write, FileShare.None))
+                    using (ZipArchive archive = new ZipArchive(zipStream, ZipArchiveMode.Create))
+                    {
+                        string entryName = Path.GetFileName(sourceFile);
+                        ZipArchiveEntry entry = archive.CreateEntry(entryName, CompressionLevel.Optimal);
+
+                        using (Stream entryStream = entry.Open())
+                        using (FileStream sourceStream = new FileStream(sourceFile, FileMode.Open, FileAccess.Read, FileShare.Read))
+                        {
+                            await sourceStream.CopyToAsync(entryStream, 81920, ct);
+                        }
+                    }
+
+                    return true;
+                }
+                catch (IOException ex) when (IsFileLocked(ex) && i < maxRetries - 1)
+                {
+                    // Exponential backoff
+                    await Task.Delay(delayMs * (int)Math.Pow(2, i), ct);
+                }
+                catch
+                {
+                    // 실패 시 생성된 파일 삭제
+                    if (File.Exists(zipPath))
+                    {
+                        try { File.Delete(zipPath); } catch { }
+                    }
+
+                    if (i == maxRetries - 1) return false;
+                }
+            }
+
+            return false;
         }
 
         private async Task<bool> CopyFileWithRetryAsync(string source, string destination, CancellationToken ct)
@@ -424,31 +566,42 @@ namespace D2RSaveMonitor
                 var fileInfo = new FileInfo(backupFilePath);
                 var fileName = fileInfo.Name;
 
-                // Parse timestamp from filename: {name}_{yyyyMMdd_HHmmss}.d2s
-                // 예: Amazon.d2s_20251002_082801.d2s
+                // 압축 여부 확인
+                bool isCompressed = fileName.EndsWith(".d2s.zip", StringComparison.OrdinalIgnoreCase);
+                bool isUncompressed = fileName.EndsWith(".d2s", StringComparison.OrdinalIgnoreCase);
 
-                // 1. .d2s 확장자 제거
-                if (!fileName.EndsWith(".d2s", StringComparison.OrdinalIgnoreCase))
+                if (!isCompressed && !isUncompressed)
                 {
                     return null;
                 }
 
-                var fileNameWithoutExt = fileName.Substring(0, fileName.Length - 4); // "Amazon.d2s_20251002_082801"
+                // Parse timestamp from filename
+                // 압축: {name}_{yyyyMMdd_HHmmss}.d2s.zip
+                // 비압축: {name}_{yyyyMMdd_HHmmss}.d2s
+                string fileNameWithoutExt;
+                if (isCompressed)
+                {
+                    fileNameWithoutExt = fileName.Substring(0, fileName.Length - 8); // ".d2s.zip" 제거
+                }
+                else
+                {
+                    fileNameWithoutExt = fileName.Substring(0, fileName.Length - 4); // ".d2s" 제거
+                }
 
-                // 2. 마지막 언더스코어 찾기 (시간 부분 분리)
+                // 마지막 언더스코어 찾기 (시간 부분 분리)
                 var lastUnderscoreIndex = fileNameWithoutExt.LastIndexOf('_');
                 if (lastUnderscoreIndex < 0) return null;
 
                 var timePart = fileNameWithoutExt.Substring(lastUnderscoreIndex + 1); // "082801"
                 var remaining = fileNameWithoutExt.Substring(0, lastUnderscoreIndex); // "Amazon.d2s_20251002"
 
-                // 3. 그 다음 언더스코어 찾기 (날짜 부분 분리)
+                // 그 다음 언더스코어 찾기 (날짜 부분 분리)
                 var secondLastUnderscoreIndex = remaining.LastIndexOf('_');
                 if (secondLastUnderscoreIndex < 0) return null;
 
                 var datePart = remaining.Substring(secondLastUnderscoreIndex + 1); // "20251002"
 
-                // 4. 타임스탬프 파싱
+                // 타임스탬프 파싱
                 if (datePart.Length != 8 || timePart.Length != 6) return null;
 
                 var year = int.Parse(datePart.Substring(0, 4));
@@ -460,13 +613,41 @@ namespace D2RSaveMonitor
 
                 var timestamp = new DateTime(year, month, day, hour, minute, second);
 
+                long compressedSize = fileInfo.Length;
+                long originalSize = compressedSize;
+
+                // 압축 파일인 경우 원본 크기 확인
+                if (isCompressed)
+                {
+                    try
+                    {
+                        using (FileStream fs = new FileStream(backupFilePath, FileMode.Open, FileAccess.Read, FileShare.Read))
+                        using (ZipArchive archive = new ZipArchive(fs, ZipArchiveMode.Read))
+                        {
+                            var entry = archive.Entries.FirstOrDefault();
+                            if (entry != null)
+                            {
+                                originalSize = entry.Length;
+                            }
+                        }
+                    }
+                    catch
+                    {
+                        // 원본 크기를 알 수 없으면 압축 크기 사용
+                        originalSize = compressedSize;
+                    }
+                }
+
                 return new BackupMetadata
                 {
                     OriginalFile = originalFileName,
                     BackupFile = fileName,
                     Timestamp = timestamp,
-                    FileSize = fileInfo.Length,
-                    Status = BackupStatus.Valid
+                    FileSize = originalSize,  // 원본 파일 크기
+                    Status = BackupStatus.Valid,
+                    IsCompressed = isCompressed,
+                    CompressedSize = compressedSize,
+                    OriginalSize = originalSize
                 };
             }
             catch
