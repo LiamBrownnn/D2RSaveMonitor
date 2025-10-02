@@ -13,6 +13,7 @@ namespace D2RSaveMonitor
 
         private CheckBox chkAutoBackupDanger;
         private CheckBox chkPeriodicBackup;
+        private CheckBox chkEnableCompression;
         private NumericUpDown nudPeriodicInterval;
         private NumericUpDown nudMaxBackups;
         private NumericUpDown nudCooldown;
@@ -30,7 +31,7 @@ namespace D2RSaveMonitor
         private void InitializeComponent()
         {
             Text = "백업 설정";
-            Size = new Size(450, 350);
+            Size = new Size(450, 390);  // 높이 증가 (350 → 390)
             StartPosition = FormStartPosition.CenterParent;
             FormBorderStyle = FormBorderStyle.FixedDialog;
             MaximizeBox = false;
@@ -54,11 +55,19 @@ namespace D2RSaveMonitor
             };
             Controls.Add(chkAutoBackupDanger);
 
+            chkEnableCompression = new CheckBox
+            {
+                Text = "백업 파일 압축 (디스크 공간 50~70% 절약)",
+                Location = new Point(40, 75),
+                Size = new Size(350, 20)
+            };
+            Controls.Add(chkEnableCompression);
+
             // Periodic backup
             Label lblPeriodic = new Label
             {
                 Text = "주기적 백업 설정:",
-                Location = new Point(20, 90),
+                Location = new Point(20, 115),  // 90 → 115
                 Size = new Size(200, 20),
                 Font = new Font(Font, FontStyle.Bold)
             };
@@ -67,7 +76,7 @@ namespace D2RSaveMonitor
             chkPeriodicBackup = new CheckBox
             {
                 Text = "주기적 자동 백업 활성화",
-                Location = new Point(40, 120),
+                Location = new Point(40, 145),  // 120 → 145
                 Size = new Size(200, 20)
             };
             chkPeriodicBackup.CheckedChanged += ChkPeriodicBackup_CheckedChanged;
@@ -76,14 +85,14 @@ namespace D2RSaveMonitor
             Label lblInterval = new Label
             {
                 Text = "백업 주기(분):",
-                Location = new Point(60, 150),
+                Location = new Point(60, 175),  // 150 → 175
                 Size = new Size(120, 20)
             };
             Controls.Add(lblInterval);
 
             nudPeriodicInterval = new NumericUpDown
             {
-                Location = new Point(180, 148),
+                Location = new Point(180, 173),  // 148 → 173
                 Size = new Size(80, 20),
                 Minimum = 5,
                 Maximum = 240,
@@ -95,7 +104,7 @@ namespace D2RSaveMonitor
             Label lblMinutes = new Label
             {
                 Text = "분",
-                Location = new Point(265, 150),
+                Location = new Point(265, 175),  // 150 → 175
                 Size = new Size(30, 20)
             };
             Controls.Add(lblMinutes);
@@ -104,7 +113,7 @@ namespace D2RSaveMonitor
             Label lblRetention = new Label
             {
                 Text = "백업 보관 설정:",
-                Location = new Point(20, 190),
+                Location = new Point(20, 215),  // 190 → 215
                 Size = new Size(200, 20),
                 Font = new Font(Font, FontStyle.Bold)
             };
@@ -113,14 +122,14 @@ namespace D2RSaveMonitor
             Label lblMaxBackups = new Label
             {
                 Text = "파일당 최대 백업 개수:",
-                Location = new Point(40, 220),
+                Location = new Point(40, 245),  // 220 → 245
                 Size = new Size(140, 20)
             };
             Controls.Add(lblMaxBackups);
 
             nudMaxBackups = new NumericUpDown
             {
-                Location = new Point(180, 218),
+                Location = new Point(180, 243),  // 218 → 243
                 Size = new Size(80, 20),
                 Minimum = 1,
                 Maximum = 100,
@@ -131,7 +140,7 @@ namespace D2RSaveMonitor
             Label lblBackups = new Label
             {
                 Text = "개",
-                Location = new Point(265, 220),
+                Location = new Point(265, 245),  // 220 → 245
                 Size = new Size(30, 20)
             };
             Controls.Add(lblBackups);
@@ -139,14 +148,14 @@ namespace D2RSaveMonitor
             Label lblCooldown = new Label
             {
                 Text = "자동 백업 쿨다운(초):",
-                Location = new Point(40, 250),
+                Location = new Point(40, 275),  // 250 → 275
                 Size = new Size(140, 20)
             };
             Controls.Add(lblCooldown);
 
             nudCooldown = new NumericUpDown
             {
-                Location = new Point(180, 248),
+                Location = new Point(180, 273),  // 248 → 273
                 Size = new Size(80, 20),
                 Minimum = 10,
                 Maximum = 300,
@@ -158,7 +167,7 @@ namespace D2RSaveMonitor
             Label lblSeconds = new Label
             {
                 Text = "초",
-                Location = new Point(265, 250),
+                Location = new Point(265, 275),  // 250 → 275
                 Size = new Size(30, 20)
             };
             Controls.Add(lblSeconds);
@@ -167,7 +176,7 @@ namespace D2RSaveMonitor
             btnResetDefaults = new Button
             {
                 Text = "기본값으로 복원",
-                Location = new Point(20, 280),
+                Location = new Point(20, 315),  // 280 → 315
                 Size = new Size(120, 30)
             };
             btnResetDefaults.Click += BtnResetDefaults_Click;
@@ -176,7 +185,7 @@ namespace D2RSaveMonitor
             btnCancel = new Button
             {
                 Text = "취소",
-                Location = new Point(240, 280),
+                Location = new Point(240, 315),  // 280 → 315
                 Size = new Size(90, 30),
                 DialogResult = DialogResult.Cancel
             };
@@ -185,7 +194,7 @@ namespace D2RSaveMonitor
             btnSave = new Button
             {
                 Text = "저장",
-                Location = new Point(340, 280),
+                Location = new Point(340, 315),  // 280 → 315
                 Size = new Size(90, 30),
                 DialogResult = DialogResult.OK
             };
@@ -199,6 +208,7 @@ namespace D2RSaveMonitor
         private void LoadSettings()
         {
             chkAutoBackupDanger.Checked = settings.AutoBackupOnDanger;
+            chkEnableCompression.Checked = settings.EnableCompression;
             chkPeriodicBackup.Checked = settings.PeriodicBackupEnabled;
             nudPeriodicInterval.Value = Math.Max(nudPeriodicInterval.Minimum, Math.Min(nudPeriodicInterval.Maximum, settings.PeriodicIntervalMinutes));
             nudMaxBackups.Value = Math.Max(nudMaxBackups.Minimum, Math.Min(nudMaxBackups.Maximum, settings.MaxBackupsPerFile));
@@ -230,6 +240,7 @@ namespace D2RSaveMonitor
             {
                 var defaults = new BackupSettings();
                 chkAutoBackupDanger.Checked = defaults.AutoBackupOnDanger;
+                chkEnableCompression.Checked = defaults.EnableCompression;
                 chkPeriodicBackup.Checked = defaults.PeriodicBackupEnabled;
                 nudPeriodicInterval.Value = defaults.PeriodicIntervalMinutes;
                 nudMaxBackups.Value = defaults.MaxBackupsPerFile;
@@ -243,6 +254,7 @@ namespace D2RSaveMonitor
             {
                 // Update settings
                 settings.AutoBackupOnDanger = chkAutoBackupDanger.Checked;
+                settings.EnableCompression = chkEnableCompression.Checked;
                 settings.PeriodicBackupEnabled = chkPeriodicBackup.Checked;
                 settings.PeriodicIntervalMinutes = (int)nudPeriodicInterval.Value;
                 settings.MaxBackupsPerFile = (int)nudMaxBackups.Value;
@@ -252,7 +264,7 @@ namespace D2RSaveMonitor
                 settings.SaveToRegistry();
 
                 MessageBox.Show(
-                    "설정이 저장되었습니다.",
+                    "설정이 저장되었습니다.\n\n참고: 압축 설정은 새로 생성되는 백업부터 적용됩니다.",
                     "저장 완료",
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Information
