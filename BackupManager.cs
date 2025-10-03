@@ -11,13 +11,14 @@ namespace D2RSaveMonitor
 {
     /// <summary>
     /// Manages backup and restore operations for save files
+    /// Implements Repository pattern for backup data access
     /// </summary>
-    public class BackupManager : IDisposable
+    public class BackupManager : IBackupRepository, IDisposable
     {
         #region Fields
         private readonly string backupDirectory;
         private readonly BackupSettings settings;
-        private readonly SemaphoreSlim backupLock = new SemaphoreSlim(1, 1);
+        private readonly ConcurrentDictionary<string, SemaphoreSlim> fileLocks = new ConcurrentDictionary<string, SemaphoreSlim>();
         private readonly ConcurrentDictionary<string, DateTime> lastBackupTimes = new ConcurrentDictionary<string, DateTime>();
         private readonly object indexLock = new object();
         private bool disposed = false;
@@ -37,7 +38,7 @@ namespace D2RSaveMonitor
         #region Constructor
         public BackupManager(string saveDirectory, BackupSettings settings)
         {
-            this.settings = settings ?? BackupSettings.LoadFromRegistry();
+            this.settings = settings ?? SettingsManager.LoadSettings();
 
             // Determine backup directory
             if (!string.IsNullOrEmpty(settings?.CustomBackupPath))
@@ -96,7 +97,9 @@ namespace D2RSaveMonitor
         {
             var startTime = DateTime.Now;
 
-            await backupLock.WaitAsync();
+            // 파일별 세마포어 획득
+            var fileLock = GetFileLock(sourceFile);
+            await fileLock.WaitAsync();
             try
             {
                 // Fire started event
@@ -139,7 +142,7 @@ namespace D2RSaveMonitor
             }
             finally
             {
-                backupLock.Release();
+                fileLock.Release();
             }
         }
 
@@ -180,7 +183,12 @@ namespace D2RSaveMonitor
             try
             {
                 var fileName = Path.GetFileName(characterFile);
-                var backups = Directory.GetFiles(backupDirectory, $"{fileName}_*.d2s*")
+
+                // 파일 목록 가져오기 및 확장자 검증
+                var allFiles = Directory.GetFiles(backupDirectory, $"{fileName}_*.d2s*");
+                var validFiles = SecurityHelper.FilterValidBackupFiles(allFiles);
+
+                var backups = validFiles
                     .Select(backupFile => ParseBackupMetadata(backupFile))
                     .Where(metadata => metadata != null &&
                            string.Equals(metadata.OriginalFile, fileName, StringComparison.OrdinalIgnoreCase))
@@ -202,7 +210,11 @@ namespace D2RSaveMonitor
         {
             try
             {
-                var backups = Directory.GetFiles(backupDirectory, "*.d2s*")
+                // 파일 목록 가져오기 및 확장자 검증
+                var allFiles = Directory.GetFiles(backupDirectory, "*.d2s*");
+                var validFiles = SecurityHelper.FilterValidBackupFiles(allFiles);
+
+                var backups = validFiles
                     .Select(ParseBackupMetadata)
                     .Where(metadata => metadata != null)
                     .OrderByDescending(m => m.Timestamp)
@@ -226,7 +238,9 @@ namespace D2RSaveMonitor
                 RestoredFile = targetPath
             };
 
-            await backupLock.WaitAsync();
+            // 대상 파일에 대한 세마포어 획득
+            var fileLock = GetFileLock(targetPath);
+            await fileLock.WaitAsync();
             try
             {
                 // Check if backup file exists
@@ -275,7 +289,7 @@ namespace D2RSaveMonitor
             }
             finally
             {
-                backupLock.Release();
+                fileLock.Release();
             }
         }
 
@@ -302,7 +316,7 @@ namespace D2RSaveMonitor
                         using (Stream entryStream = entry.Open())
                         using (FileStream targetStream = new FileStream(targetPath, FileMode.Create, FileAccess.Write, FileShare.None))
                         {
-                            await entryStream.CopyToAsync(targetStream, 81920, ct);
+                            await entryStream.CopyToAsync(targetStream, TimingConstants.FileCopyBufferSize, ct);
                         }
                     }
 
@@ -327,7 +341,10 @@ namespace D2RSaveMonitor
         /// </summary>
         public async Task<bool> DeleteBackupAsync(BackupMetadata backup)
         {
-            await backupLock.WaitAsync();
+            // 백업 파일 자체에 대한 락은 필요 없음 (원본 파일과 다른 파일이므로)
+            // 그러나 안전을 위해 원본 파일 이름을 키로 사용
+            var fileLock = GetFileLock(backup.OriginalFile);
+            await fileLock.WaitAsync();
             try
             {
                 var backupPath = Path.Combine(backupDirectory, backup.BackupFile);
@@ -344,9 +361,48 @@ namespace D2RSaveMonitor
             }
             finally
             {
-                backupLock.Release();
+                fileLock.Release();
             }
         }
+
+        #region IBackupRepository Explicit Implementation
+        // 명시적 인터페이스 구현으로 기존 메서드 이름 유지 / Explicit interface implementation to maintain existing method names
+
+        Task<BackupResult> IBackupRepository.CreateAsync(string sourceFile, BackupTrigger trigger)
+        {
+            return CreateBackupAsync(sourceFile, trigger);
+        }
+
+        Task<List<BackupResult>> IBackupRepository.CreateBulkAsync(IEnumerable<string> sourceFiles, BackupTrigger trigger)
+        {
+            return CreateBulkBackupAsync(sourceFiles, trigger);
+        }
+
+        List<BackupMetadata> IBackupRepository.GetHistory(string characterFile)
+        {
+            return GetBackupHistory(characterFile);
+        }
+
+        List<BackupMetadata> IBackupRepository.GetAll()
+        {
+            return GetAllBackups();
+        }
+
+        Task<RestoreResult> IBackupRepository.RestoreAsync(BackupMetadata backup, string targetPath, bool createPreRestoreBackup)
+        {
+            return RestoreBackupAsync(backup, targetPath, createPreRestoreBackup);
+        }
+
+        Task<bool> IBackupRepository.DeleteAsync(BackupMetadata backup)
+        {
+            return DeleteBackupAsync(backup);
+        }
+
+        bool IBackupRepository.CanCreate(string sourceFile, BackupTrigger trigger)
+        {
+            return CanCreateBackup(sourceFile, trigger);
+        }
+        #endregion
         #endregion
 
         #region Private Methods
@@ -451,7 +507,7 @@ namespace D2RSaveMonitor
                         using (Stream entryStream = entry.Open())
                         using (FileStream sourceStream = new FileStream(sourceFile, FileMode.Open, FileAccess.Read, FileShare.Read))
                         {
-                            await sourceStream.CopyToAsync(entryStream, 81920, ct);
+                            await sourceStream.CopyToAsync(entryStream, TimingConstants.FileCopyBufferSize, ct);
                         }
                     }
 
@@ -489,7 +545,7 @@ namespace D2RSaveMonitor
                     using (var sourceStream = new FileStream(source, FileMode.Open, FileAccess.Read, FileShare.Read))
                     using (var destStream = new FileStream(destination, FileMode.Create, FileAccess.Write, FileShare.None))
                     {
-                        await sourceStream.CopyToAsync(destStream, 81920, ct);
+                        await sourceStream.CopyToAsync(destStream, TimingConstants.FileCopyBufferSize, ct);
                         return true;
                     }
                 }
@@ -517,6 +573,12 @@ namespace D2RSaveMonitor
         {
             try
             {
+                // 쿨다운 항목 정리
+                CleanupOldCooldownEntries();
+
+                // 사용하지 않는 세마포어 정리
+                CleanupUnusedFileLocks();
+
                 var backups = GetBackupHistory(characterFile);
 
                 if (backups.Count > settings.MaxBackupsPerFile)
@@ -627,6 +689,87 @@ namespace D2RSaveMonitor
                 return null;
             }
         }
+
+        /// <summary>
+        /// 오래된 백업 쿨다운 항목 정리 / Cleanup old cooldown entries
+        /// </summary>
+        private void CleanupOldCooldownEntries()
+        {
+            try
+            {
+                var cutoffTime = DateTime.Now.AddHours(-24); // 24시간 이상 지난 항목 제거
+                var keysToRemove = lastBackupTimes
+                    .Where(kvp => kvp.Value < cutoffTime)
+                    .Select(kvp => kvp.Key)
+                    .ToList();
+
+                foreach (var key in keysToRemove)
+                {
+                    lastBackupTimes.TryRemove(key, out _);
+                }
+
+                // 디버그 로깅 (필요시)
+                if (keysToRemove.Count > 0)
+                {
+                    System.Diagnostics.Debug.WriteLine($"Cleaned up {keysToRemove.Count} old cooldown entries");
+                }
+            }
+            catch (Exception ex)
+            {
+                // 정리 실패는 중요하지 않으므로 무시
+                System.Diagnostics.Debug.WriteLine($"Cooldown cleanup failed: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// 파일별 세마포어 획득 / Get file-specific semaphore
+        /// </summary>
+        private SemaphoreSlim GetFileLock(string filePath)
+        {
+            return fileLocks.GetOrAdd(filePath, _ => new SemaphoreSlim(1, 1));
+        }
+
+        /// <summary>
+        /// 사용하지 않는 세마포어 정리 / Cleanup unused semaphores
+        /// </summary>
+        private void CleanupUnusedFileLocks()
+        {
+            try
+            {
+                var cutoffTime = DateTime.Now.AddHours(-1); // 1시간 이상 사용하지 않은 세마포어 제거
+                var locksToRemove = new List<string>();
+
+                foreach (var kvp in fileLocks)
+                {
+                    var filePath = kvp.Key;
+                    var semaphore = kvp.Value;
+
+                    // 세마포어가 사용 중이 아니고, 최근에 백업하지 않은 파일인 경우
+                    if (semaphore.CurrentCount > 0 &&
+                        (!lastBackupTimes.TryGetValue(filePath, out DateTime lastBackup) || lastBackup < cutoffTime))
+                    {
+                        locksToRemove.Add(filePath);
+                    }
+                }
+
+                foreach (var key in locksToRemove)
+                {
+                    if (fileLocks.TryRemove(key, out SemaphoreSlim removedSemaphore))
+                    {
+                        removedSemaphore?.Dispose();
+                    }
+                }
+
+                if (locksToRemove.Count > 0)
+                {
+                    System.Diagnostics.Debug.WriteLine($"Cleaned up {locksToRemove.Count} unused file locks");
+                }
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"File lock cleanup failed: {ex.Message}");
+            }
+        }
         #endregion
 
         #region IDisposable
@@ -642,7 +785,19 @@ namespace D2RSaveMonitor
             {
                 if (disposing)
                 {
-                    backupLock?.Dispose();
+                    // 모든 파일별 세마포어 해제
+                    foreach (var semaphore in fileLocks.Values)
+                    {
+                        try
+                        {
+                            semaphore?.Dispose();
+                        }
+                        catch
+                        {
+                            // 개별 세마포어 정리 실패는 무시
+                        }
+                    }
+                    fileLocks.Clear();
                 }
                 disposed = true;
             }

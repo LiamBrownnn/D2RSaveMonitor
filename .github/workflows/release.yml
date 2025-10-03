@@ -1,0 +1,59 @@
+name: Create Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+jobs:
+  release:
+    runs-on: windows-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup .NET 8
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: '8.0.x'
+
+    - name: Restore dependencies
+      run: dotnet restore D2RSaveMonitor.csproj
+
+    - name: Publish Release (Self-contained)
+      run: dotnet publish D2RSaveMonitor.csproj --configuration Release --output ./publish --self-contained true --runtime win-x64 /p:PublishSingleFile=true /p:IncludeNativeLibrariesForSelfExtract=true
+
+    - name: Create ZIP archive
+      run: |
+        Compress-Archive -Path ./publish/* -DestinationPath D2RSaveMonitor-${{ github.ref_name }}.zip
+
+    - name: Create Release
+      uses: softprops/action-gh-release@v1
+      with:
+        files: |
+          D2RSaveMonitor-${{ github.ref_name }}.zip
+        body: |
+          # Release ${{ github.ref_name }}
+
+          ## Changes
+          See [CHANGELOG.md](CHANGELOG.md) for details.
+
+          ## Installation
+          1. Download the ZIP file
+          2. Extract to a folder
+          3. Run D2RSaveMonitor.exe
+
+          ## Requirements
+          - Windows 10/11 (x64)
+          - .NET 8 Runtime (included in release - no separate installation needed)
+          - Diablo II: Resurrected
+
+          ## Notes
+          - This release is self-contained and includes the .NET 8 runtime
+          - No separate .NET installation required
+          - File size is larger due to included runtime (~150MB)
+        draft: false
+        prerelease: false
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -440,8 +440,8 @@ namespace D2RSaveMonitor
             catch (Exception ex)
             {
                 MessageBox.Show(
-                    $"필터 적용 중 오류 발생:\n{ex.Message}",
-                    "오류",
+                    string.Format(LanguageManager.GetString("FilterApplyError"), ex.Message),
+                    LanguageManager.GetString("Error"),
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Error
                 );
