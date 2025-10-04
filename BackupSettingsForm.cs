@@ -35,7 +35,7 @@ namespace D2RSaveMonitor
 
         private void InitializeComponent()
         {
-            Text = "백업 설정";
+            Text = LanguageManager.GetString("BackupSettingsTitle");
             Size = new Size(470, 540);
             StartPosition = FormStartPosition.CenterParent;
             FormBorderStyle = FormBorderStyle.FixedDialog;
@@ -45,7 +45,7 @@ namespace D2RSaveMonitor
             // Auto backup on danger
             Label lblAutoBackup = new Label
             {
-                Text = "자동 백업 설정:",
+                Text = LanguageManager.GetString("AutoBackupSettings"),
                 Location = new Point(20, 20),
                 Size = new Size(200, 20),
                 Font = new Font(Font, FontStyle.Bold)
@@ -54,7 +54,7 @@ namespace D2RSaveMonitor
 
             chkAutoBackupDanger = new CheckBox
             {
-                Text = "위험 수준(7500 bytes) 도달 시 자동 백업",
+                Text = LanguageManager.GetString("AutoBackupDanger"),
                 Location = new Point(40, 50),
                 Size = new Size(350, 20)
             };
@@ -62,7 +62,7 @@ namespace D2RSaveMonitor
 
             chkEnableCompression = new CheckBox
             {
-                Text = "백업 파일 압축 (디스크 공간 50~70% 절약)",
+                Text = LanguageManager.GetString("EnableCompression"),
                 Location = new Point(40, 75),
                 Size = new Size(350, 20)
             };
@@ -71,7 +71,7 @@ namespace D2RSaveMonitor
             // Periodic backup
             Label lblPeriodic = new Label
             {
-                Text = "주기적 백업 설정:",
+                Text = LanguageManager.GetString("PeriodicBackupSettings"),
                 Location = new Point(20, 115),
                 Size = new Size(200, 20),
                 Font = new Font(Font, FontStyle.Bold)
@@ -80,7 +80,7 @@ namespace D2RSaveMonitor
 
             chkPeriodicBackup = new CheckBox
             {
-                Text = "주기적 자동 백업 활성화",
+                Text = LanguageManager.GetString("PeriodicBackupEnable"),
                 Location = new Point(40, 145),
                 Size = new Size(220, 20)
             };
@@ -89,7 +89,7 @@ namespace D2RSaveMonitor
 
             grpPeriodicScope = new GroupBox
             {
-                Text = "백업 대상 범위",
+                Text = LanguageManager.GetString("PeriodicScopeGroup"),
                 Location = new Point(40, 175),
                 Size = new Size(380, 130)
             };
@@ -97,7 +97,7 @@ namespace D2RSaveMonitor
 
             rdoScopeDanger = new RadioButton
             {
-                Text = "위험 구간만 (7500 bytes 이상)",
+                Text = LanguageManager.GetString("PeriodicScopeDangerDetailed"),
                 Location = new Point(15, 25),
                 Size = new Size(280, 20)
             };
@@ -105,7 +105,7 @@ namespace D2RSaveMonitor
 
             rdoScopeWarning = new RadioButton
             {
-                Text = "경고 이상 (7000 bytes 이상)",
+                Text = LanguageManager.GetString("PeriodicScopeWarningDetailed"),
                 Location = new Point(15, 50),
                 Size = new Size(280, 20)
             };
@@ -113,7 +113,7 @@ namespace D2RSaveMonitor
 
             rdoScopeAll = new RadioButton
             {
-                Text = "전체 구간 (변경 발생 시마다)",
+                Text = LanguageManager.GetString("PeriodicScopeAllDetailed"),
                 Location = new Point(15, 75),
                 Size = new Size(280, 20)
             };
@@ -121,7 +121,7 @@ namespace D2RSaveMonitor
 
             lblScopeHint = new Label
             {
-                Text = "* 주기 백업 활성화 시 선택된 조건을 만족하는 파일을 백업합니다.",
+                Text = LanguageManager.GetString("PeriodicScopeHint"),
                 Location = new Point(12, 100),
                 Size = new Size(350, 20),
                 ForeColor = Color.DimGray
@@ -130,7 +130,7 @@ namespace D2RSaveMonitor
 
             Label lblInterval = new Label
             {
-                Text = "백업 주기(분):",
+                Text = LanguageManager.GetString("BackupIntervalMin"),
                 Location = new Point(60, 320),
                 Size = new Size(120, 20)
             };
@@ -149,7 +149,7 @@ namespace D2RSaveMonitor
 
             Label lblMinutes = new Label
             {
-                Text = "분",
+                Text = LanguageManager.GetString("Minutes"),
                 Location = new Point(265, 320),
                 Size = new Size(30, 20)
             };
@@ -158,7 +158,7 @@ namespace D2RSaveMonitor
             // Backup retention
             Label lblRetention = new Label
             {
-                Text = "백업 보관 설정:",
+                Text = LanguageManager.GetString("BackupRetentionSettings"),
                 Location = new Point(20, 360),
                 Size = new Size(200, 20),
                 Font = new Font(Font, FontStyle.Bold)
@@ -167,7 +167,7 @@ namespace D2RSaveMonitor
 
             Label lblMaxBackups = new Label
             {
-                Text = "파일당 최대 백업 개수:",
+                Text = LanguageManager.GetString("MaxBackupsPerFile"),
                 Location = new Point(40, 390),
                 Size = new Size(140, 20)
             };
@@ -185,7 +185,7 @@ namespace D2RSaveMonitor
 
             Label lblBackups = new Label
             {
-                Text = "개",
+                Text = LanguageManager.GetString("Count"),
                 Location = new Point(265, 390),
                 Size = new Size(30, 20)
             };
@@ -193,7 +193,7 @@ namespace D2RSaveMonitor
 
             Label lblCooldown = new Label
             {
-                Text = "자동 백업 쿨다운(초):",
+                Text = LanguageManager.GetString("BackupCooldownSec"),
                 Location = new Point(40, 420),
                 Size = new Size(140, 20)
             };
@@ -212,7 +212,7 @@ namespace D2RSaveMonitor
 
             Label lblSeconds = new Label
             {
-                Text = "초",
+                Text = LanguageManager.GetString("Seconds"),
                 Location = new Point(265, 420),
                 Size = new Size(30, 20)
             };
@@ -221,7 +221,7 @@ namespace D2RSaveMonitor
             // Buttons
             btnResetDefaults = new Button
             {
-                Text = "기본값으로 복원",
+                Text = LanguageManager.GetString("ResetDefaults"),
                 Location = new Point(20, 460),
                 Size = new Size(120, 30)
             };
@@ -230,7 +230,7 @@ namespace D2RSaveMonitor
 
             btnCancel = new Button
             {
-                Text = "취소",
+                Text = LanguageManager.GetString("Cancel"),
                 Location = new Point(240, 460),
                 Size = new Size(90, 30),
                 DialogResult = DialogResult.Cancel
@@ -239,7 +239,7 @@ namespace D2RSaveMonitor
 
             btnSave = new Button
             {
-                Text = "저장",
+                Text = LanguageManager.GetString("Save"),
                 Location = new Point(340, 460),
                 Size = new Size(90, 30),
                 DialogResult = DialogResult.OK
@@ -278,8 +278,8 @@ namespace D2RSaveMonitor
         private void BtnResetDefaults_Click(object sender, EventArgs e)
         {
             var result = MessageBox.Show(
-                "모든 설정을 기본값으로 복원하시겠습니까?",
-                "기본값 복원",
+                LanguageManager.GetString("ResetConfirm"),
+                LanguageManager.GetString("ResetConfirmTitle"),
                 MessageBoxButtons.YesNo,
                 MessageBoxIcon.Question
             );
@@ -312,9 +312,8 @@ namespace D2RSaveMonitor
                 settings.SaveToRegistry();
 
                 MessageBox.Show(
-                    $"설정이 저장되었습니다.{Environment.NewLine}{Environment.NewLine}" +
-                    "참고: 압축 설정은 새로 생성되는 백업부터 적용됩니다.",
-                    "저장 완료",
+                    LanguageManager.GetString("SaveSuccess"),
+                    LanguageManager.GetString("SaveSuccessTitle"),
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Information
                 );
@@ -322,8 +321,8 @@ namespace D2RSaveMonitor
             catch (Exception ex)
             {
                 MessageBox.Show(
-                    $"설정 저장 중 오류가 발생했습니다:{Environment.NewLine}{ex.Message}",
-                    "오류",
+                    string.Format(LanguageManager.GetString("SettingsSaveFailed"), ex.Message),
+                    LanguageManager.GetString("Error"),
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Error
                 );

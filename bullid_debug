@@ -1,0 +1,26 @@
+오후 5:25에 빌드를 시작함...
+1>------ 빌드 시작: 프로젝트: D2RSaveMonitor, 구성: Release Any CPU ------
+1>C:\Users\xxxby\OneDrive\Desktop\dev\D2RSaveMonitor\BackupManager.cs(558,32,558,36): error CS8370: '범위 연산자' 기능은 C# 7.3에서 사용할 수 없습니다. 8.0 이상의 언어 버전을 사용하세요.
+1>C:\Users\xxxby\OneDrive\Desktop\dev\D2RSaveMonitor\BackupManager.cs(558,32,558,36): error CS0518: 미리 정의된 형식 'System.Range'을(를) 정의하지 않았거나 가져오지 않았습니다.
+1>C:\Users\xxxby\OneDrive\Desktop\dev\D2RSaveMonitor\BackupManager.cs(558,34,558,36): error CS8370: '인덱스 연산자' 기능은 C# 7.3에서 사용할 수 없습니다. 8.0 이상의 언어 버전을 사용하세요.
+1>C:\Users\xxxby\OneDrive\Desktop\dev\D2RSaveMonitor\BackupManager.cs(558,34,558,36): error CS0518: 미리 정의된 형식 'System.Index'을(를) 정의하지 않았거나 가져오지 않았습니다.
+1>C:\Users\xxxby\OneDrive\Desktop\dev\D2RSaveMonitor\BackupManager.cs(558,34,558,36): error CS0656: System.Index..ctor' 멤버가 필요한 컴파일러가 없습니다.
+1>C:\Users\xxxby\OneDrive\Desktop\dev\D2RSaveMonitor\BackupManager.cs(566,50,566,54): error CS8370: '범위 연산자' 기능은 C# 7.3에서 사용할 수 없습니다. 8.0 이상의 언어 버전을 사용하세요.
+1>C:\Users\xxxby\OneDrive\Desktop\dev\D2RSaveMonitor\BackupManager.cs(566,50,566,54): error CS0518: 미리 정의된 형식 'System.Range'을(를) 정의하지 않았거나 가져오지 않았습니다.
+1>C:\Users\xxxby\OneDrive\Desktop\dev\D2RSaveMonitor\BackupManager.cs(566,52,566,54): error CS8370: '인덱스 연산자' 기능은 C# 7.3에서 사용할 수 없습니다. 8.0 이상의 언어 버전을 사용하세요.
+1>C:\Users\xxxby\OneDrive\Desktop\dev\D2RSaveMonitor\BackupManager.cs(566,52,566,54): error CS0518: 미리 정의된 형식 'System.Index'을(를) 정의하지 않았거나 가져오지 않았습니다.
+1>C:\Users\xxxby\OneDrive\Desktop\dev\D2RSaveMonitor\BackupManager.cs(566,52,566,54): error CS0656: System.Index..ctor' 멤버가 필요한 컴파일러가 없습니다.
+1>C:\Users\xxxby\OneDrive\Desktop\dev\D2RSaveMonitor\BackupManager.cs(574,50,574,72): error CS8370: '범위 연산자' 기능은 C# 7.3에서 사용할 수 없습니다. 8.0 이상의 언어 버전을 사용하세요.
+1>C:\Users\xxxby\OneDrive\Desktop\dev\D2RSaveMonitor\BackupManager.cs(574,50,574,72): error CS0518: 미리 정의된 형식 'System.Range'을(를) 정의하지 않았거나 가져오지 않았습니다.
+1>C:\Users\xxxby\OneDrive\Desktop\dev\D2RSaveMonitor\BackupManager.cs(574,50,574,70): error CS0518: 미리 정의된 형식 'System.Index'을(를) 정의하지 않았거나 가져오지 않았습니다.
+1>C:\Users\xxxby\OneDrive\Desktop\dev\D2RSaveMonitor\BackupManager.cs(575,51,575,67): error CS8370: '범위 연산자' 기능은 C# 7.3에서 사용할 수 없습니다. 8.0 이상의 언어 버전을 사용하세요.
+1>C:\Users\xxxby\OneDrive\Desktop\dev\D2RSaveMonitor\BackupManager.cs(575,51,575,67): error CS0518: 미리 정의된 형식 'System.Range'을(를) 정의하지 않았거나 가져오지 않았습니다.
+1>C:\Users\xxxby\OneDrive\Desktop\dev\D2RSaveMonitor\BackupManager.cs(575,53,575,67): error CS0518: 미리 정의된 형식 'System.Index'을(를) 정의하지 않았거나 가져오지 않았습니다.
+1>C:\Users\xxxby\OneDrive\Desktop\dev\D2RSaveMonitor\BackupManager.cs(583,45,583,73): error CS8370: '범위 연산자' 기능은 C# 7.3에서 사용할 수 없습니다. 8.0 이상의 언어 버전을 사용하세요.
+1>C:\Users\xxxby\OneDrive\Desktop\dev\D2RSaveMonitor\BackupManager.cs(583,45,583,73): error CS0518: 미리 정의된 형식 'System.Range'을(를) 정의하지 않았거나 가져오지 않았습니다.
+1>C:\Users\xxxby\OneDrive\Desktop\dev\D2RSaveMonitor\BackupManager.cs(583,45,583,71): error CS0518: 미리 정의된 형식 'System.Index'을(를) 정의하지 않았거나 가져오지 않았습니다.
+1>C:\Users\xxxby\OneDrive\Desktop\dev\D2RSaveMonitor\BackupManager.cs(584,48,584,70): error CS8370: '범위 연산자' 기능은 C# 7.3에서 사용할 수 없습니다. 8.0 이상의 언어 버전을 사용하세요.
+1>C:\Users\xxxby\OneDrive\Desktop\dev\D2RSaveMonitor\BackupManager.cs(584,48,584,70): error CS0518: 미리 정의된 형식 'System.Range'을(를) 정의하지 않았거나 가져오지 않았습니다.
+1>C:\Users\xxxby\OneDrive\Desktop\dev\D2RSaveMonitor\BackupManager.cs(584,50,584,70): error CS0518: 미리 정의된 형식 'System.Index'을(를) 정의하지 않았거나 가져오지 않았습니다.
+========== 빌드: 0개 성공, 1개 실패, 0개 최신 상태, 0개 건너뜀 ==========
+========== 빌드이(가) 오후 5:25에 완료되었으며, 00.879 초이(가) 걸림 ==========

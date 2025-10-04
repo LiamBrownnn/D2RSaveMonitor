@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.IO.Compression;
 using System.Linq;
@@ -180,8 +181,8 @@ namespace D2RSaveMonitor
             try
             {
                 var fileName = Path.GetFileName(characterFile);
-                var backups = Directory.GetFiles(backupDirectory, $"{fileName}_*.d2s*")
-                    .Select(backupFile => ParseBackupMetadata(backupFile))
+                var backups = Directory.EnumerateFiles(backupDirectory, "*.d2s*")
+                    .Select(ParseBackupMetadata)
                     .Where(metadata => metadata != null &&
                            string.Equals(metadata.OriginalFile, fileName, StringComparison.OrdinalIgnoreCase))
                     .OrderByDescending(m => m.Timestamp)
@@ -366,11 +367,12 @@ namespace D2RSaveMonitor
 
                 // Get file info
                 var fileInfo = new FileInfo(sourceFile);
-                var fileName = fileInfo.Name;
+                var originalFileName = fileInfo.Name;
                 long originalSize = fileInfo.Length;
 
                 // Generate backup filename
-                var timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
+                DateTime now = DateTime.Now;
+                string timestamp = now.ToString("yyyyMMdd_HHmmssfff");
                 bool useCompression = settings.EnableCompression;
 
                 string backupFileName;
@@ -378,17 +380,19 @@ namespace D2RSaveMonitor
                 bool success;
                 long backupFileSize;
 
+                string fileBaseName = Path.GetFileNameWithoutExtension(originalFileName);
+
                 if (useCompression)
                 {
                     // 압축 백업: .d2s.zip 확장자 사용
-                    backupFileName = $"{fileName}_{timestamp}.d2s.zip";
+                    backupFileName = $"{fileBaseName}_{timestamp}.d2s.zip";
                     backupPath = Path.Combine(backupDirectory, backupFileName);
                     success = await CreateCompressedBackupAsync(sourceFile, backupPath, CancellationToken.None);
                 }
                 else
                 {
                     // 비압축 백업: .d2s 확장자 사용
-                    backupFileName = $"{fileName}_{timestamp}.d2s";
+                    backupFileName = $"{fileBaseName}_{timestamp}.d2s";
                     backupPath = Path.Combine(backupDirectory, backupFileName);
                     success = await CopyFileWithRetryAsync(sourceFile, backupPath, CancellationToken.None);
                 }
@@ -402,9 +406,9 @@ namespace D2RSaveMonitor
                     // Create metadata
                     result.Metadata = new BackupMetadata
                     {
-                        OriginalFile = fileName,
+                        OriginalFile = originalFileName,
                         BackupFile = backupFileName,
-                        Timestamp = DateTime.Now,
+                        Timestamp = now,
                         FileSize = originalSize,  // 원본 파일 크기
                         TriggerReason = trigger,
                         IsAutomatic = trigger != BackupTrigger.ManualSingle && trigger != BackupTrigger.ManualBulk,
@@ -542,7 +546,6 @@ namespace D2RSaveMonitor
                 var fileInfo = new FileInfo(backupFilePath);
                 var fileName = fileInfo.Name;
 
-                // 압축 여부 확인
                 bool isCompressed = fileName.EndsWith(".d2s.zip", StringComparison.OrdinalIgnoreCase);
                 bool isUncompressed = fileName.EndsWith(".d2s", StringComparison.OrdinalIgnoreCase);
 
@@ -552,7 +555,7 @@ namespace D2RSaveMonitor
                 }
 
                 string coreName = isCompressed
-                    ? fileName.Substring(0, fileName.Length - 4) // ".zip" 제거
+                    ? fileName.Substring(0, fileName.Length - 4) // remove .zip
                     : fileName;
 
                 if (!coreName.EndsWith(".d2s", StringComparison.OrdinalIgnoreCase))
@@ -560,32 +563,49 @@ namespace D2RSaveMonitor
                     return null;
                 }
 
-                string nameWithoutExt = coreName.Substring(0, coreName.Length - 4);
+                string nameWithoutExt = coreName.Substring(0, coreName.Length - 4); // remove .d2s
 
-                int lastUnderscoreIndex = nameWithoutExt.LastIndexOf('_');
-                if (lastUnderscoreIndex < 0) return null;
+                int lastUnderscore = nameWithoutExt.LastIndexOf('_');
+                if (lastUnderscore < 0)
+                {
+                    return null;
+                }
 
-                string timePart = nameWithoutExt.Substring(lastUnderscoreIndex + 1);
-                string remaining = nameWithoutExt.Substring(0, lastUnderscoreIndex);
+                string timePart = nameWithoutExt.Substring(lastUnderscore + 1);
+                string remaining = nameWithoutExt.Substring(0, lastUnderscore);
 
-                int secondLastUnderscoreIndex = remaining.LastIndexOf('_');
-                if (secondLastUnderscoreIndex < 0) return null;
+                int secondLastUnderscore = remaining.LastIndexOf('_');
+                if (secondLastUnderscore < 0)
+                {
+                    return null;
+                }
 
-                string datePart = remaining.Substring(secondLastUnderscoreIndex + 1);
-                string baseName = remaining.Substring(0, secondLastUnderscoreIndex) + ".d2s";
+                string datePart = remaining.Substring(secondLastUnderscore + 1);
+                string baseSegment = remaining.Substring(0, secondLastUnderscore);
 
-                if (datePart.Length != 8) return null;
-                if (timePart.Length != 6 && timePart.Length != 9) return null;
+                if (datePart.Length != 8)
+                {
+                    return null;
+                }
 
-                var year = int.Parse(datePart.Substring(0, 4));
-                var month = int.Parse(datePart.Substring(4, 2));
-                var day = int.Parse(datePart.Substring(6, 2));
-                var hour = int.Parse(timePart.Substring(0, 2));
-                var minute = int.Parse(timePart.Substring(2, 2));
-                var second = int.Parse(timePart.Substring(4, 2));
-                int millisecond = timePart.Length > 6 ? int.Parse(timePart.Substring(6)) : 0;
+                if (timePart.Length != 6 && timePart.Length != 9)
+                {
+                    return null;
+                }
 
-                var timestamp = new DateTime(year, month, day, hour, minute, second, millisecond);
+                if (!DateTime.TryParseExact(
+                        datePart + timePart,
+                        timePart.Length == 6 ? "yyyyMMddHHmmss" : "yyyyMMddHHmmssfff",
+                        null,
+                        System.Globalization.DateTimeStyles.None,
+                        out DateTime timestamp))
+                {
+                    return null;
+                }
+
+                string originalFileName = baseSegment.EndsWith(".d2s", StringComparison.OrdinalIgnoreCase)
+                    ? baseSegment
+                    : baseSegment + ".d2s";
 
                 long compressedSize = fileInfo.Length;
                 long originalSize = compressedSize;
@@ -612,7 +632,7 @@ namespace D2RSaveMonitor
 
                 return new BackupMetadata
                 {
-                    OriginalFile = baseName,
+                    OriginalFile = originalFileName,
                     BackupFile = fileName,
                     Timestamp = timestamp,
                     FileSize = originalSize,
