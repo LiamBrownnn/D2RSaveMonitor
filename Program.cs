@@ -16,23 +16,7 @@ namespace D2RSaveMonitor
         {
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
-
-            // 로깅 시작 / Start logging
-            Logger.Info("D2RSaveMonitor 시작 / Application started");
-
-            try
-            {
-                Application.Run(new Form1());
-            }
-            catch (Exception ex)
-            {
-                Logger.Critical("Application 최상위 예외 / Top-level application exception", ex);
-                throw;
-            }
-            finally
-            {
-                Logger.Info("D2RSaveMonitor 종료 / Application exiting");
-            }
+            Application.Run(new Form1());
         }
     }
 }

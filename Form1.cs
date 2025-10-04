@@ -65,11 +65,6 @@ namespace D2RSaveMonitor
         /// Maximum retry attempts for locked files
         /// </summary>
         public const int MaxFileAccessRetries = 3;
-
-        /// <summary>
-        /// Buffer size for file copy operations (80KB)
-        /// </summary>
-        public const int FileCopyBufferSize = 81920; // 80 * 1024
     }
 
     /// <summary>
@@ -113,7 +108,10 @@ namespace D2RSaveMonitor
     {
         #region Fields
         private string savePath = "";
-        private FileMonitoringService fileMonitoringService;
+        private FileSystemWatcher fileWatcher;
+        private System.Windows.Forms.Timer debounceTimer;
+        private readonly HashSet<string> pendingChanges = new HashSet<string>();
+        private readonly object debounceTimerLock = new object();
         private OverlayManager overlayManager;
         private bool overlayShown = false;
         private bool overlayEnabled = true;
@@ -153,12 +151,15 @@ namespace D2RSaveMonitor
         private Label lblPath;
         private Label lblProgressText;
 
+        private static readonly string LogFilePath = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "D2RMonitor",
+            "errors.log"
+        );
         #endregion
 
         public Form1()
         {
-            Logger.Info("Form1 초기화 시작 / Form1 initialization started");
-
             // Load language settings first
             LanguageManager.LoadLanguage();
 
@@ -167,26 +168,10 @@ namespace D2RSaveMonitor
             LoadSettings();
             overlayManager = new OverlayManager();
             InitializeBackupSystem();
-            InitializeFileMonitoring();
             StartMonitoring();
 
             // Subscribe to language change event
             LanguageManager.LanguageChanged += OnLanguageChanged;
-
-            Logger.Info("Form1 초기화 완료 / Form1 initialization completed");
-        }
-
-        /// <summary>
-        /// 파일 모니터링 서비스 초기화 / Initialize file monitoring service
-        /// </summary>
-        private void InitializeFileMonitoring()
-        {
-            fileMonitoringService = new FileMonitoringService();
-
-            // Subscribe to monitoring events
-            fileMonitoringService.FilesChanged += OnFilesChanged;
-            fileMonitoringService.MonitoringError += OnMonitoringError;
-            fileMonitoringService.StatusChanged += OnMonitoringStatusChanged;
         }
 
         private void InitializeUI()
@@ -436,7 +421,7 @@ namespace D2RSaveMonitor
             try
             {
                 // Load backup settings
-                backupSettings = SettingsManager.LoadSettings();
+                backupSettings = BackupSettings.LoadFromRegistry();
 
                 // Create backup manager
                 backupManager = new BackupManager(savePath, backupSettings);
@@ -458,7 +443,7 @@ namespace D2RSaveMonitor
             }
             catch (Exception ex)
             {
-                Logger.Error("백업 시스템 초기화 실패", ex);
+                LogError("백업 시스템 초기화 실패", ex);
                 MessageBox.Show(
                     $"{LanguageManager.GetString("BackupInitFailed")}:\n{ex.Message}\n\n{LanguageManager.GetString("MonitoringContinues")}",
                     LanguageManager.GetString("Warning"),
@@ -497,13 +482,6 @@ namespace D2RSaveMonitor
         {
             try
             {
-                // null 체크
-                if (backupSettings == null || backupManager == null)
-                {
-                    Logger.Warning("주기적 백업 스킵: 백업 시스템이 초기화되지 않음");
-                    return;
-                }
-
                 if (!backupSettings.PeriodicBackupEnabled) return;
 
                 var candidates = Directory.GetFiles(savePath, "*.d2s")
@@ -532,7 +510,7 @@ namespace D2RSaveMonitor
             }
             catch (Exception ex)
             {
-                Logger.Error("주기적 백업 실패", ex);
+                LogError("주기적 백업 실패", ex);
             }
         }
 
@@ -632,7 +610,7 @@ namespace D2RSaveMonitor
             }
 
             UpdateStatus($"백업 실패: {e.FileName} - {e.ErrorMessage}", Color.Red);
-            Logger.Error($"백업 실패: {e.FileName}", e.Exception);
+            LogError($"백업 실패: {e.FileName}", e.Exception);
         }
 
         private void OnBackupProgress(object sender, BackupProgressEventArgs e)
@@ -682,11 +660,33 @@ namespace D2RSaveMonitor
 
             try
             {
-                // Start monitoring service
-                fileMonitoringService.StartMonitoring(savePath);
+                // Initialize FileSystemWatcher
+                fileWatcher = new FileSystemWatcher
+                {
+                    Path = savePath,
+                    Filter = "*.d2s",
+                    NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.Size | NotifyFilters.FileName,
+                    EnableRaisingEvents = true
+                };
+
+                // Subscribe to events
+                fileWatcher.Changed += OnFileChanged;
+                fileWatcher.Created += OnFileChanged;
+                fileWatcher.Deleted += OnFileChanged;
+                fileWatcher.Renamed += OnFileRenamed;
+                fileWatcher.Error += OnWatcherError;
+
+                // Initialize debounce timer
+                debounceTimer = new System.Windows.Forms.Timer
+                {
+                    Interval = TimingConstants.FileChangeDebounceMs
+                };
+                debounceTimer.Tick += DebounceTimer_Tick;
 
                 // Initial scan
                 CheckSaveFiles();
+
+                UpdateStatus($"모니터링 시작: {savePath}", Color.Green);
             }
             catch (Exception ex)
             {
@@ -698,62 +698,114 @@ namespace D2RSaveMonitor
         {
             try
             {
-                fileMonitoringService?.StopMonitoring();
+                if (debounceTimer != null)
+                {
+                    debounceTimer.Stop();
+                    debounceTimer.Dispose();
+                    debounceTimer = null;
+                }
+
+                if (fileWatcher != null)
+                {
+                    fileWatcher.EnableRaisingEvents = false;
+                    fileWatcher.Dispose();
+                    fileWatcher = null;
+                }
             }
             catch (Exception ex)
             {
-                Logger.Error("Monitoring cleanup error", ex);
+                LogError("Monitoring cleanup error", ex);
             }
         }
 
-        /// <summary>
-        /// 파일 변경 이벤트 핸들러 / Files changed event handler
-        /// </summary>
-        private void OnFilesChanged(object sender, FileChangedEventArgs e)
+        private void OnFileChanged(object sender, FileSystemEventArgs e)
         {
             if (InvokeRequired)
             {
-                BeginInvoke(new Action(() => OnFilesChanged(sender, e)));
+                BeginInvoke(new Action(() => OnFileChanged(sender, e)));
                 return;
             }
 
-            // 파일 변경 감지 시 전체 스캔 수행
-            CheckSaveFiles();
+            lock (debounceTimerLock)
+            {
+                pendingChanges.Add(e.FullPath);
+
+                debounceTimer.Stop();
+                debounceTimer.Start();
+            }
         }
 
-        /// <summary>
-        /// 모니터링 오류 이벤트 핸들러 / Monitoring error event handler
-        /// </summary>
-        private void OnMonitoringError(object sender, MonitoringStatusEventArgs e)
+        private void OnFileRenamed(object sender, RenamedEventArgs e)
         {
             if (InvokeRequired)
             {
-                BeginInvoke(new Action(() => OnMonitoringError(sender, e)));
+                BeginInvoke(new Action(() => OnFileRenamed(sender, e)));
                 return;
             }
 
-            UpdateStatus(e.Message, Color.Red);
-            Logger.Error(e.Message);
+            lock (debounceTimerLock)
+            {
+                pendingChanges.Add(e.OldFullPath);
+                pendingChanges.Add(e.FullPath);
+
+                debounceTimer.Stop();
+                debounceTimer.Start();
+            }
         }
 
-        /// <summary>
-        /// 모니터링 상태 변경 이벤트 핸들러 / Monitoring status changed event handler
-        /// </summary>
-        private void OnMonitoringStatusChanged(object sender, MonitoringStatusEventArgs e)
+        private void DebounceTimer_Tick(object sender, EventArgs e)
         {
+            debounceTimer.Stop();
+
+            lock (debounceTimerLock)
+            {
+                if (pendingChanges.Count > 0)
+                {
+                    pendingChanges.Clear();
+                    CheckSaveFiles();
+                }
+            }
+        }
+
+        private void OnWatcherError(object sender, ErrorEventArgs e)
+        {
+            Exception ex = e.GetException();
+
             if (InvokeRequired)
             {
-                BeginInvoke(new Action(() => OnMonitoringStatusChanged(sender, e)));
+                BeginInvoke(new Action(() => HandleWatcherError(ex)));
                 return;
             }
 
-            UpdateStatus(e.Message, e.IsError ? Color.Red : Color.Green);
+            HandleWatcherError(ex);
+        }
+
+        private void HandleWatcherError(Exception ex)
+        {
+            UpdateStatus($"모니터링 오류: {ex?.Message ?? "Unknown error"}", Color.Red);
+
+            try
+            {
+                fileWatcher?.Dispose();
+                System.Threading.Thread.Sleep(1000);
+                StartMonitoring();
+            }
+            catch (Exception restartEx)
+            {
+                LogError("파일 모니터링 재시작 실패", restartEx);
+                MessageBox.Show(
+                    $"파일 모니터링 재시작 실패:\n{restartEx.Message}\n\n애플리케이션을 다시 시작하세요.",
+                    "심각한 오류",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Error
+                );
+            }
         }
 
         private void HandleMonitoringError(string message)
         {
             UpdateStatus(message, Color.Red);
-            Logger.Error(message);
+            LogError(message, null);
         }
         #endregion
 
@@ -787,13 +839,13 @@ namespace D2RSaveMonitor
             {
                 savePath = GetDefaultSavePath();
                 txtSavePath.Text = savePath;
-                Logger.Warning("레지스트리 접근 거부 - 기본값 사용");
+                LogError("레지스트리 접근 거부 - 기본값 사용", null);
             }
             catch (Exception ex)
             {
                 savePath = GetDefaultSavePath();
                 txtSavePath.Text = savePath;
-                Logger.Error("설정 로드 실패", ex);
+                LogError("설정 로드 실패", ex);
             }
         }
 
@@ -812,16 +864,12 @@ namespace D2RSaveMonitor
             }
             catch (UnauthorizedAccessException)
             {
-                Logger.Warning("레지스트리 쓰기 권한 없음");
+                LogError("레지스트리 쓰기 권한 없음", null);
             }
             catch (Exception ex)
             {
-                Logger.Error("설정 저장 실패", ex);
-                MessageBox.Show(
-                    string.Format(LanguageManager.GetString("SettingsSaveFailed"), ex.Message),
-                    LanguageManager.GetString("Error"),
-                    MessageBoxButtons.OK,
-                    MessageBoxIcon.Error);
+                LogError("설정 저장 실패", ex);
+                MessageBox.Show($"설정 저장 실패: {ex.Message}", "오류", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }
         #endregion
@@ -837,7 +885,7 @@ namespace D2RSaveMonitor
         {
             using (FolderBrowserDialog dialog = new FolderBrowserDialog())
             {
-                dialog.Description = LanguageManager.GetString("SelectSaveFolder");
+                dialog.Description = "디아블로 2 세이브 폴더를 선택하세요";
                 dialog.SelectedPath = savePath;
 
                 if (dialog.ShowDialog() == DialogResult.OK)
@@ -872,35 +920,37 @@ namespace D2RSaveMonitor
                 if (string.IsNullOrWhiteSpace(savePath))
                 {
                     MessageBox.Show(
-                        LanguageManager.GetString("SavePathNotSet"),
-                        LanguageManager.GetString("Notice"),
+                        "세이브 경로가 설정되지 않았습니다.",
+                        "알림",
                         MessageBoxButtons.OK,
                         MessageBoxIcon.Information
                     );
                     return;
                 }
 
-                // 보안 검증 및 안전한 폴더 열기
-                if (!SecurityHelper.OpenDirectoryInExplorer(savePath, out string errorMessage))
+                if (!Directory.Exists(savePath))
                 {
                     MessageBox.Show(
-                        errorMessage ?? LanguageManager.GetString("CannotOpenFolder"),
-                        LanguageManager.GetString("Error"),
+                        $"세이브 폴더를 찾을 수 없습니다:\n{savePath}",
+                        "오류",
                         MessageBoxButtons.OK,
                         MessageBoxIcon.Error
                     );
-                    Logger.Error("세이브 폴더 열기 실패", new InvalidOperationException(errorMessage));
+                    return;
                 }
+
+                // 탐색기로 폴더 열기
+                System.Diagnostics.Process.Start("explorer.exe", savePath);
             }
             catch (Exception ex)
             {
                 MessageBox.Show(
-                    string.Format("{0}:\n{1}", LanguageManager.GetString("CannotOpenFolder"), ex.Message),
-                    LanguageManager.GetString("Error"),
+                    $"폴더를 열 수 없습니다:\n{ex.Message}",
+                    "오류",
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Error
                 );
-                Logger.Error("세이브 폴더 열기 실패", ex);
+                LogError("세이브 폴더 열기 실패", ex);
             }
         }
 
@@ -911,8 +961,8 @@ namespace D2RSaveMonitor
                 if (backupManager == null)
                 {
                     MessageBox.Show(
-                        LanguageManager.GetString("BackupSystemNotInitialized"),
-                        LanguageManager.GetString("Notice"),
+                        "백업 시스템이 초기화되지 않았습니다.",
+                        "알림",
                         MessageBoxButtons.OK,
                         MessageBoxIcon.Information
                     );
@@ -936,27 +986,18 @@ namespace D2RSaveMonitor
                     Directory.CreateDirectory(backupDirectory);
                 }
 
-                // 보안 검증 및 안전한 폴더 열기
-                if (!SecurityHelper.OpenDirectoryInExplorer(backupDirectory, out string errorMessage))
-                {
-                    MessageBox.Show(
-                        errorMessage ?? LanguageManager.GetString("CannotOpenBackupFolder"),
-                        LanguageManager.GetString("Error"),
-                        MessageBoxButtons.OK,
-                        MessageBoxIcon.Error
-                    );
-                    Logger.Error("백업 폴더 열기 실패", new InvalidOperationException(errorMessage));
-                }
+                // 탐색기로 폴더 열기
+                System.Diagnostics.Process.Start("explorer.exe", backupDirectory);
             }
             catch (Exception ex)
             {
                 MessageBox.Show(
-                    string.Format("{0}:\n{1}", LanguageManager.GetString("CannotOpenBackupFolder"), ex.Message),
-                    LanguageManager.GetString("Error"),
+                    $"백업 폴더를 열 수 없습니다:\n{ex.Message}",
+                    "오류",
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Error
                 );
-                Logger.Error("백업 폴더 열기 실패", ex);
+                LogError("백업 폴더 열기 실패", ex);
             }
         }
 
@@ -969,29 +1010,17 @@ namespace D2RSaveMonitor
             // 버튼 텍스트 업데이트 (선택된 개수 표시)
             if (selectedCount > 1)
             {
-                btnBackupSelected.Text = string.Format(LanguageManager.GetString("BtnBackupSelectedWithCount"), selectedCount);
+                btnBackupSelected.Text = $"선택 파일 백업 ({selectedCount}개)";
             }
             else
             {
-                btnBackupSelected.Text = LanguageManager.GetString("BtnBackupSelected");
+                btnBackupSelected.Text = "선택 파일 백업";
             }
         }
 
         private async void BtnBackupSelected_Click(object sender, EventArgs e)
         {
             if (dgvFiles.SelectedRows.Count == 0) return;
-
-            // backupManager null 체크
-            if (backupManager == null)
-            {
-                MessageBox.Show(
-                    LanguageManager.GetString("BackupSystemNotInitialized"),
-                    LanguageManager.GetString("Error"),
-                    MessageBoxButtons.OK,
-                    MessageBoxIcon.Error
-                );
-                return;
-            }
 
             try
             {
@@ -1015,10 +1044,8 @@ namespace D2RSaveMonitor
                     if (result.Success)
                     {
                         MessageBox.Show(
-                            string.Format(LanguageManager.GetString("BackupSuccessWithTime"),
-                                Path.GetFileName(selectedFiles[0]),
-                                result.Duration.TotalMilliseconds.ToString("F0")),
-                            LanguageManager.GetString("BackupSuccessTitle"),
+                            $"백업 완료: {Path.GetFileName(selectedFiles[0])}\n백업 시간: {result.Duration.TotalMilliseconds:F0}ms",
+                            "백업 성공",
                             MessageBoxButtons.OK,
                             MessageBoxIcon.Information
                         );
@@ -1026,10 +1053,8 @@ namespace D2RSaveMonitor
                     else
                     {
                         MessageBox.Show(
-                            string.Format(LanguageManager.GetString("BackupFailedWithError"),
-                                Path.GetFileName(selectedFiles[0]),
-                                result.ErrorMessage),
-                            LanguageManager.GetString("BackupFailedTitle"),
+                            $"백업 실패: {Path.GetFileName(selectedFiles[0])}\n오류: {result.ErrorMessage}",
+                            "백업 실패",
                             MessageBoxButtons.OK,
                             MessageBoxIcon.Error
                         );
@@ -1039,8 +1064,8 @@ namespace D2RSaveMonitor
                 else
                 {
                     var confirmResult = MessageBox.Show(
-                        string.Format(LanguageManager.GetString("ConfirmSelectedBackup"), selectedFiles.Count),
-                        LanguageManager.GetString("ConfirmSelectedBackupTitle"),
+                        $"{selectedFiles.Count}개의 파일을 백업하시겠습니까?",
+                        "선택 파일 백업 확인",
                         MessageBoxButtons.YesNo,
                         MessageBoxIcon.Question
                     );
@@ -1053,15 +1078,15 @@ namespace D2RSaveMonitor
                     int successCount = results.Count(r => r.Success);
                     int failCount = results.Count(r => !r.Success);
 
-                    string message = string.Format(LanguageManager.GetString("BackupCompleteStats"), successCount);
+                    string message = $"백업 완료: {successCount}개 성공";
                     if (failCount > 0)
                     {
-                        message += string.Format(LanguageManager.GetString("BackupStatsWithFail"), failCount);
+                        message += $", {failCount}개 실패";
                     }
 
                     MessageBox.Show(
                         message,
-                        LanguageManager.GetString("SelectedBackupCompleteTitle"),
+                        "선택 파일 백업 완료",
                         MessageBoxButtons.OK,
                         failCount > 0 ? MessageBoxIcon.Warning : MessageBoxIcon.Information
                     );
@@ -1070,12 +1095,12 @@ namespace D2RSaveMonitor
             catch (Exception ex)
             {
                 MessageBox.Show(
-                    string.Format(LanguageManager.GetString("BackupErrorOccurred"), ex.Message),
-                    LanguageManager.GetString("Error"),
+                    $"백업 중 오류 발생:\n{ex.Message}",
+                    "오류",
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Error
                 );
-                Logger.Error("수동 백업 실패", ex);
+                LogError("수동 백업 실패", ex);
             }
             finally
             {
@@ -1086,29 +1111,15 @@ namespace D2RSaveMonitor
 
         private async void BtnBackupAll_Click(object sender, EventArgs e)
         {
-            // backupManager null 체크
-            if (backupManager == null)
-            {
-                MessageBox.Show(
-                    LanguageManager.GetString("BackupSystemNotInitialized"),
-                    LanguageManager.GetString("Error"),
-                    MessageBoxButtons.OK,
-                    MessageBoxIcon.Error
-                );
-                return;
-            }
-
             try
             {
-                // 파일 목록 가져오기 및 확장자 검증
-                var allFiles = Directory.GetFiles(savePath, "*.d2s");
-                var files = SecurityHelper.FilterValidSaveFiles(allFiles).ToList();
+                var files = Directory.GetFiles(savePath, "*.d2s").ToList();
 
                 if (files.Count == 0)
                 {
                     MessageBox.Show(
-                        LanguageManager.GetString("NoFilesToBackup"),
-                        LanguageManager.GetString("Notice"),
+                        "백업할 파일이 없습니다.",
+                        "알림",
                         MessageBoxButtons.OK,
                         MessageBoxIcon.Information
                     );
@@ -1116,8 +1127,8 @@ namespace D2RSaveMonitor
                 }
 
                 var confirmResult = MessageBox.Show(
-                    string.Format(LanguageManager.GetString("ConfirmBackupAll"), files.Count),
-                    LanguageManager.GetString("ConfirmBackupAllTitle"),
+                    $"{files.Count}개의 캐릭터 파일을 백업하시겠습니까?",
+                    "전체 백업 확인",
                     MessageBoxButtons.YesNo,
                     MessageBoxIcon.Question
                 );
@@ -1132,15 +1143,15 @@ namespace D2RSaveMonitor
                 int successCount = results.Count(r => r.Success);
                 int failCount = results.Count(r => !r.Success);
 
-                string message = string.Format(LanguageManager.GetString("BackupCompleteStats"), successCount);
+                string message = $"백업 완료: {successCount}개 성공";
                 if (failCount > 0)
                 {
-                    message += string.Format(LanguageManager.GetString("BackupStatsWithFail"), failCount);
+                    message += $", {failCount}개 실패";
                 }
 
                 MessageBox.Show(
                     message,
-                    LanguageManager.GetString("BackupAllCompleteTitle"),
+                    "전체 백업 완료",
                     MessageBoxButtons.OK,
                     failCount > 0 ? MessageBoxIcon.Warning : MessageBoxIcon.Information
                 );
@@ -1148,12 +1159,12 @@ namespace D2RSaveMonitor
             catch (Exception ex)
             {
                 MessageBox.Show(
-                    string.Format(LanguageManager.GetString("BackupAllError"), ex.Message),
-                    LanguageManager.GetString("Error"),
+                    $"전체 백업 중 오류 발생:\n{ex.Message}",
+                    "오류",
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Error
                 );
-                Logger.Error("전체 백업 실패", ex);
+                LogError("전체 백업 실패", ex);
             }
             finally
             {
@@ -1178,12 +1189,12 @@ namespace D2RSaveMonitor
             catch (Exception ex)
             {
                 MessageBox.Show(
-                    string.Format(LanguageManager.GetString("CannotOpenBackupList"), ex.Message),
-                    LanguageManager.GetString("Error"),
+                    $"백업 목록을 열 수 없습니다:\n{ex.Message}",
+                    "오류",
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Error
                 );
-                Logger.Error("백업 목록 열기 실패", ex);
+                LogError("백업 목록 열기 실패", ex);
             }
         }
 
@@ -1196,7 +1207,7 @@ namespace D2RSaveMonitor
                     if (settingsForm.ShowDialog() == DialogResult.OK)
                     {
                         // Settings were saved in the dialog
-                        backupSettings = SettingsManager.LoadSettings();
+                        backupSettings = BackupSettings.LoadFromRegistry();
 
                         // Update periodic backup timer
                         StopPeriodicBackupTimer();
@@ -1213,12 +1224,12 @@ namespace D2RSaveMonitor
             catch (Exception ex)
             {
                 MessageBox.Show(
-                    string.Format(LanguageManager.GetString("CannotOpenSettings"), ex.Message),
-                    LanguageManager.GetString("Error"),
+                    $"설정을 열 수 없습니다:\n{ex.Message}",
+                    "오류",
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Error
                 );
-                Logger.Error("백업 설정 열기 실패", ex);
+                LogError("백업 설정 열기 실패", ex);
             }
         }
 
@@ -1302,14 +1313,75 @@ namespace D2RSaveMonitor
                     return;
                 }
 
-                string[] d2sFiles = GetD2SFiles();
-                if (d2sFiles == null)
+                string[] d2sFiles;
+                try
                 {
-                    return; // Error already handled
+                    d2sFiles = Directory.GetFiles(savePath, "*.d2s");
+                }
+                catch (UnauthorizedAccessException)
+                {
+                    UpdateStatus("세이브 폴더 접근 권한 없음", Color.Red);
+                    return;
+                }
+                catch (DirectoryNotFoundException)
+                {
+                    UpdateStatus("세이브 폴더를 찾을 수 없음", Color.Red);
+                    return;
                 }
 
-                var result = ProcessAllSaveFiles(d2sFiles);
-                UpdateCheckStatusDisplay(result);
+                bool anyWarning = false;
+                int successCount = 0;
+                int errorCount = 0;
+
+                foreach (string filePath in d2sFiles)
+                {
+                    try
+                    {
+                        FileInfo fileInfo = GetFileInfoWithRetry(filePath);
+                        if (fileInfo == null)
+                        {
+                            errorCount++;
+                            continue;
+                        }
+
+                        ProcessSaveFile(fileInfo, ref anyWarning);
+                        successCount++;
+                    }
+                    catch (FileNotFoundException)
+                    {
+                        // File deleted between enumeration and processing - ignore
+                        continue;
+                    }
+                    catch (UnauthorizedAccessException)
+                    {
+                        LogError($"파일 접근 거부: {Path.GetFileName(filePath)}", null);
+                        errorCount++;
+                    }
+                    catch (IOException ex)
+                    {
+                        LogError($"파일 읽기 실패: {Path.GetFileName(filePath)}", ex);
+                        errorCount++;
+                    }
+                    catch (Exception ex)
+                    {
+                        LogError($"예상치 못한 오류: {Path.GetFileName(filePath)}", ex);
+                        errorCount++;
+                    }
+                }
+
+                if (!anyWarning)
+                {
+                    overlayShown = false;
+                }
+
+                string statusMessage = $"마지막 체크: {DateTime.Now:HH:mm:ss} - {successCount}개 파일 처리됨";
+
+                if (errorCount > 0)
+                {
+                    statusMessage += $" ({errorCount}개 오류)";
+                }
+
+                UpdateStatus(statusMessage, anyWarning ? Color.Red : Color.Green);
             }
             catch (Exception ex)
             {
@@ -1317,111 +1389,7 @@ namespace D2RSaveMonitor
             }
         }
 
-        /// <summary>
-        /// 세이브 폴더에서 .d2s 파일 목록 가져오기 / Get .d2s files from save folder
-        /// </summary>
-        private string[] GetD2SFiles()
-        {
-            try
-            {
-                // 파일 목록 가져오기 및 확장자 검증
-                var allFiles = Directory.GetFiles(savePath, "*.d2s");
-                return SecurityHelper.FilterValidSaveFiles(allFiles);
-            }
-            catch (UnauthorizedAccessException)
-            {
-                UpdateStatus("세이브 폴더 접근 권한 없음", Color.Red);
-                return null;
-            }
-            catch (DirectoryNotFoundException)
-            {
-                UpdateStatus("세이브 폴더를 찾을 수 없음", Color.Red);
-                return null;
-            }
-        }
-
-        /// <summary>
-        /// 파일 처리 결과 / File processing result
-        /// </summary>
-        private struct FileProcessingResult
-        {
-            public bool AnyWarning;
-            public int SuccessCount;
-            public int ErrorCount;
-        }
-
-        /// <summary>
-        /// 모든 세이브 파일 처리 / Process all save files
-        /// </summary>
-        private FileProcessingResult ProcessAllSaveFiles(string[] filePaths)
-        {
-            var result = new FileProcessingResult
-            {
-                AnyWarning = false,
-                SuccessCount = 0,
-                ErrorCount = 0
-            };
-
-            foreach (string filePath in filePaths)
-            {
-                try
-                {
-                    FileInfo fileInfo = GetFileInfoWithRetryAsync(filePath).GetAwaiter().GetResult();
-                    if (fileInfo == null)
-                    {
-                        result.ErrorCount++;
-                        continue;
-                    }
-
-                    ProcessSaveFile(fileInfo, ref result.AnyWarning);
-                    result.SuccessCount++;
-                }
-                catch (FileNotFoundException)
-                {
-                    // File deleted between enumeration and processing - ignore
-                    continue;
-                }
-                catch (UnauthorizedAccessException ex)
-                {
-                    Logger.Warning($"파일 접근 거부: {Path.GetFileName(filePath)}", ex);
-                    result.ErrorCount++;
-                }
-                catch (IOException ex)
-                {
-                    Logger.Error($"파일 읽기 실패: {Path.GetFileName(filePath)}", ex);
-                    result.ErrorCount++;
-                }
-                catch (Exception ex)
-                {
-                    Logger.Error($"예상치 못한 오류: {Path.GetFileName(filePath)}", ex);
-                    result.ErrorCount++;
-                }
-            }
-
-            return result;
-        }
-
-        /// <summary>
-        /// 체크 완료 후 상태 표시 업데이트 / Update status display after check
-        /// </summary>
-        private void UpdateCheckStatusDisplay(FileProcessingResult result)
-        {
-            if (!result.AnyWarning)
-            {
-                overlayShown = false;
-            }
-
-            string statusMessage = $"마지막 체크: {DateTime.Now:HH:mm:ss} - {result.SuccessCount}개 파일 처리됨";
-
-            if (result.ErrorCount > 0)
-            {
-                statusMessage += $" ({result.ErrorCount}개 오류)";
-            }
-
-            UpdateStatus(statusMessage, result.AnyWarning ? Color.Red : Color.Green);
-        }
-
-        private async Task<FileInfo> GetFileInfoWithRetryAsync(string filePath)
+        private FileInfo GetFileInfoWithRetry(string filePath)
         {
             for (int attempt = 0; attempt < TimingConstants.MaxFileAccessRetries; attempt++)
             {
@@ -1434,7 +1402,7 @@ namespace D2RSaveMonitor
                 catch (IOException) when (attempt < TimingConstants.MaxFileAccessRetries - 1)
                 {
                     // File locked, wait and retry
-                    await Task.Delay(TimingConstants.FileAccessRetryDelayMs); // Thread.Sleep에서 Task.Delay로 변경
+                    System.Threading.Thread.Sleep(TimingConstants.FileAccessRetryDelayMs);
                 }
                 catch (UnauthorizedAccessException)
                 {
@@ -1482,7 +1450,7 @@ namespace D2RSaveMonitor
                             }
                             catch (Exception ex)
                             {
-                                Logger.Error($"자동 백업 실패: {fileName}", ex);
+                                LogError($"자동 백업 실패: {fileName}", ex);
                             }
                         });
                     }
@@ -1651,20 +1619,48 @@ namespace D2RSaveMonitor
             lblStatus.ForeColor = color;
         }
 
+        private void LogError(string message, Exception ex)
+        {
+            try
+            {
+                string logDir = Path.GetDirectoryName(LogFilePath);
+                if (!Directory.Exists(logDir))
+                {
+                    Directory.CreateDirectory(logDir);
+                }
+
+                string logEntry = $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] {message}";
+
+                if (ex != null)
+                {
+                    logEntry += $"\nException: {ex.GetType().Name}\n{ex.Message}\n{ex.StackTrace}";
+                }
+
+                logEntry += "\n---\n";
+
+                File.AppendAllText(LogFilePath, logEntry);
+
+                // Also write to debug output
+                System.Diagnostics.Debug.WriteLine(logEntry);
+            }
+            catch
+            {
+                // Logging failed - nothing we can do, suppress silently
+            }
+        }
+
         private void HandleCriticalError(string context, Exception ex)
         {
-            Logger.Critical($"{context}", ex);
+            LogError($"CRITICAL: {context}", ex);
 
-            string logDir = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-                "D2RSaveMonitor", "Logs");
-
-            string message = string.Format(LanguageManager.GetString("CriticalErrorMessage"),
-                context, ex.Message, logDir);
+            string message = $"{context}\n\n" +
+                            $"오류: {ex.Message}\n\n" +
+                            $"로그 위치: {LogFilePath}\n\n" +
+                            "계속 진행하시겠습니까?";
 
             var result = MessageBox.Show(
                 message,
-                LanguageManager.GetString("CriticalErrorTitle"),
+                "심각한 오류",
                 MessageBoxButtons.YesNo,
                 MessageBoxIcon.Error
             );
@@ -1684,7 +1680,7 @@ namespace D2RSaveMonitor
             }
             catch (Exception ex)
             {
-                Logger.Error("모니터링 중지 오류", ex);
+                LogError("모니터링 중지 오류", ex);
             }
 
             try
@@ -1693,7 +1689,7 @@ namespace D2RSaveMonitor
             }
             catch (Exception ex)
             {
-                Logger.Error("백업 타이머 중지 오류", ex);
+                LogError("백업 타이머 중지 오류", ex);
             }
 
             try
@@ -1702,7 +1698,7 @@ namespace D2RSaveMonitor
             }
             catch (Exception ex)
             {
-                Logger.Error("백업 매니저 정리 오류", ex);
+                LogError("백업 매니저 정리 오류", ex);
             }
 
             try
@@ -1711,105 +1707,10 @@ namespace D2RSaveMonitor
             }
             catch (Exception ex)
             {
-                Logger.Error("오버레이 정리 오류", ex);
+                LogError("오버레이 정리 오류", ex);
             }
 
             base.OnFormClosing(e);
-        }
-
-        /// <summary>
-        /// 리소스 정리 및 이벤트 구독 해제 / Resource cleanup and event unsubscription
-        /// </summary>
-        protected override void Dispose(bool disposing)
-        {
-            if (disposing)
-            {
-                // Dispose managed components
-                if (components != null)
-                {
-                    components.Dispose();
-                }
-
-                // 이벤트 구독 해제 / Unsubscribe from events
-                try
-                {
-                    LanguageManager.LanguageChanged -= OnLanguageChanged;
-                }
-                catch (Exception ex)
-                {
-                    Logger.Error("LanguageChanged 이벤트 구독 해제 실패", ex);
-                }
-
-                // BackupManager 이벤트 구독 해제
-                if (backupManager != null)
-                {
-                    try
-                    {
-                        backupManager.BackupStarted -= OnBackupStarted;
-                        backupManager.BackupCompleted -= OnBackupCompleted;
-                        backupManager.BackupFailed -= OnBackupFailed;
-                        backupManager.BackupProgress -= OnBackupProgress;
-                    }
-                    catch (Exception ex)
-                    {
-                        Logger.Error("BackupManager 이벤트 구독 해제 실패", ex);
-                    }
-                }
-
-                // FileMonitoringService 이벤트 구독 해제
-                if (fileMonitoringService != null)
-                {
-                    try
-                    {
-                        fileMonitoringService.FilesChanged -= OnFilesChanged;
-                        fileMonitoringService.MonitoringError -= OnMonitoringError;
-                        fileMonitoringService.StatusChanged -= OnMonitoringStatusChanged;
-                    }
-                    catch (Exception ex)
-                    {
-                        Logger.Error("FileMonitoringService 이벤트 구독 해제 실패", ex);
-                    }
-                }
-
-                // IDisposable 리소스 정리
-                try
-                {
-                    backupManager?.Dispose();
-                }
-                catch (Exception ex)
-                {
-                    Logger.Error("BackupManager Dispose 실패", ex);
-                }
-
-                try
-                {
-                    overlayManager?.Dispose();
-                }
-                catch (Exception ex)
-                {
-                    Logger.Error("OverlayManager Dispose 실패", ex);
-                }
-
-                try
-                {
-                    periodicBackupTimer?.Dispose();
-                }
-                catch (Exception ex)
-                {
-                    Logger.Error("PeriodicBackupTimer Dispose 실패", ex);
-                }
-
-                try
-                {
-                    fileMonitoringService?.Dispose();
-                }
-                catch (Exception ex)
-                {
-                    Logger.Error("FileMonitoringService Dispose 실패", ex);
-                }
-            }
-
-            base.Dispose(disposing);
         }
 
         #region Language Event Handlers
@@ -1882,8 +1783,8 @@ namespace D2RSaveMonitor
             // Status label
             lblStatus.Text = LanguageManager.GetString("StatusMonitoring");
 
-            // Refresh the grid to update status text in current language
-            CheckSaveFiles();
+            // Refresh the grid to update status text
+            // Grid will update on next file change event
         }
         #endregion
     }
@@ -1892,6 +1793,86 @@ namespace D2RSaveMonitor
     /// <summary>
     /// Manages overlay warning display with reusable timer pattern
     /// </summary>
+    public class OverlayManager : IDisposable
+    {
+        private OverlayWarningForm currentOverlay;
+        private System.Windows.Forms.Timer autoCloseTimer;
+        private readonly object overlayLock = new object();
+        private bool disposed = false;
+
+        public OverlayManager()
+        {
+            InitializeTimer();
+        }
+
+        private void InitializeTimer()
+        {
+            autoCloseTimer = new System.Windows.Forms.Timer
+            {
+                Interval = TimingConstants.OverlayDisplayDurationMs
+            };
+            autoCloseTimer.Tick += AutoCloseTimer_Tick;
+        }
+
+        public void ShowWarning(string fileName, long fileSize)
+        {
+            lock (overlayLock)
+            {
+                // Close existing overlay if present
+                CloseCurrentOverlay();
+
+                // Create new overlay
+                currentOverlay = new OverlayWarningForm(fileName, fileSize);
+                currentOverlay.Show();
+
+                // Start auto-close timer
+                autoCloseTimer.Stop();
+                autoCloseTimer.Start();
+            }
+        }
+
+        private void AutoCloseTimer_Tick(object sender, EventArgs e)
+        {
+            lock (overlayLock)
+            {
+                autoCloseTimer.Stop();
+                CloseCurrentOverlay();
+            }
+        }
+
+        private void CloseCurrentOverlay()
+        {
+            if (currentOverlay != null && !currentOverlay.IsDisposed)
+            {
+                currentOverlay.Close();
+                currentOverlay.Dispose();
+                currentOverlay = null;
+            }
+        }
+
+        public void Dispose()
+        {
+            Dispose(true);
+            GC.SuppressFinalize(this);
+        }
+
+        protected virtual void Dispose(bool disposing)
+        {
+            if (!disposed)
+            {
+                if (disposing)
+                {
+                    lock (overlayLock)
+                    {
+                        autoCloseTimer?.Stop();
+                        autoCloseTimer?.Dispose();
+                        CloseCurrentOverlay();
+                    }
+                }
+                disposed = true;
+            }
+        }
+    }
     #endregion
 
     #region Backup System Classes
@@ -1942,24 +1923,70 @@ namespace D2RSaveMonitor
         public string CustomBackupPath { get; set; }
         public bool EnableCompression { get; set; } = true;  // 백업 압축 활성화 (기본: 활성화)
 
-        // 레지스트리 메서드는 더 이상 사용하지 않음 - SettingsManager 사용
-        // Registry methods are deprecated - use SettingsManager instead
-
-        [Obsolete("Use SettingsManager.LoadSettings() instead")]
         private const string BackupRegistryKey = @"Software\D2RMonitor\Backup";
 
-        [Obsolete("Use SettingsManager.LoadSettings() instead")]
         public static BackupSettings LoadFromRegistry()
         {
-            // SettingsManager로 마이그레이션됨
-            return SettingsManager.LoadSettings();
+            try
+            {
+                using (RegistryKey key = Registry.CurrentUser.CreateSubKey(BackupRegistryKey))
+                {
+                    if (key == null) return new BackupSettings();
+
+                    return new BackupSettings
+                    {
+                        AutoBackupOnDanger = (int)key.GetValue("AutoBackupOnDanger", 1) == 1,
+                        PeriodicBackupEnabled = (int)key.GetValue("PeriodicEnabled", 0) == 1,
+                        PeriodicIntervalMinutes = (int)key.GetValue("PeriodicInterval", 30),
+                        MaxBackupsPerFile = (int)key.GetValue("MaxBackups", 10),
+                        BackupCooldownSeconds = (int)key.GetValue("CooldownSeconds", 60),
+                        CustomBackupPath = (string)key.GetValue("CustomPath", ""),
+                        EnableCompression = (int)key.GetValue("EnableCompression", 1) == 1,
+                        PeriodicScope = LoadPeriodicScope(key)
+                    };
+                }
+            }
+            catch
+            {
+                return new BackupSettings();
+            }
         }
 
-        [Obsolete("Use SettingsManager.SaveSettings() instead")]
+        private static PeriodicBackupScope LoadPeriodicScope(RegistryKey key)
+        {
+            int scopeValue = (int)key.GetValue("PeriodicScope", -1);
+            if (Enum.IsDefined(typeof(PeriodicBackupScope), scopeValue))
+            {
+                return (PeriodicBackupScope)scopeValue;
+            }
+
+            bool includeSafeZone = (int)key.GetValue("PeriodicIncludeSafeZone", 0) == 1;
+            return includeSafeZone ? PeriodicBackupScope.EntireRange : PeriodicBackupScope.WarningOrAbove;
+        }
+
         public void SaveToRegistry()
         {
-            // SettingsManager로 마이그레이션됨
-            SettingsManager.SaveSettings(this);
+            try
+            {
+                using (RegistryKey key = Registry.CurrentUser.CreateSubKey(BackupRegistryKey))
+                {
+                    if (key == null) return;
+
+                    key.SetValue("AutoBackupOnDanger", AutoBackupOnDanger ? 1 : 0);
+                    key.SetValue("PeriodicEnabled", PeriodicBackupEnabled ? 1 : 0);
+                    key.SetValue("PeriodicInterval", PeriodicIntervalMinutes);
+                    key.SetValue("MaxBackups", MaxBackupsPerFile);
+                    key.SetValue("CooldownSeconds", BackupCooldownSeconds);
+                    key.SetValue("CustomPath", CustomBackupPath ?? "");
+                    key.SetValue("EnableCompression", EnableCompression ? 1 : 0);
+                    key.SetValue("PeriodicScope", (int)PeriodicScope);
+                    key.SetValue("PeriodicIncludeSafeZone", PeriodicScope == PeriodicBackupScope.EntireRange ? 1 : 0);
+                }
+            }
+            catch
+            {
+                // Settings save failed - non-critical
+            }
         }
     }
 
@@ -2034,6 +2061,507 @@ namespace D2RSaveMonitor
         public int Current { get; set; }
         public int Total { get; set; }
         public string CurrentFile { get; set; }
+    }
+    #endregion
+
+    #region Overlay Warning Form
+    /// <summary>
+    /// 오버레이 경고 폼
+    /// </summary>
+    public class OverlayWarningForm : Form
+    {
+        // Win32 API constants
+        private const int GWL_EXSTYLE = -20;
+        private const int WS_EX_TRANSPARENT = 0x20;
+        private const int WS_EX_LAYERED = 0x80000;
+
+        public OverlayWarningForm(string fileName, long fileSize)
+        {
+            InitializeWarningForm(fileName, fileSize);
+        }
+
+        private void InitializeWarningForm(string fileName, long fileSize)
+        {
+            FormBorderStyle = FormBorderStyle.None;
+            TopMost = true;
+            StartPosition = FormStartPosition.Manual;
+            Size = new Size(UIConstants.OverlayWidth, UIConstants.OverlayHeight);
+            BackColor = Color.DarkRed;
+            Opacity = 0.9;
+
+            // Safely apply click-through transparency
+            try
+            {
+                if (!IsDisposed && IsHandleCreated)
+                {
+                    int initialStyle = GetWindowLong(Handle, GWL_EXSTYLE);
+
+                    if (initialStyle != 0) // Verify GetWindowLong succeeded
+                    {
+                        SetWindowLong(Handle, GWL_EXSTYLE,
+                                     initialStyle | WS_EX_TRANSPARENT | WS_EX_LAYERED);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                // Non-critical - overlay still works, just not click-through
+                System.Diagnostics.Debug.WriteLine($"Win32 style error: {ex.Message}");
+            }
+
+            // Position overlay
+            try
+            {
+                int screenWidth = Screen.PrimaryScreen.Bounds.Width;
+                Location = new Point(
+                    screenWidth - Width - UIConstants.OverlayMarginRight,
+                    UIConstants.OverlayMarginTop
+                );
+            }
+            catch
+            {
+                // Fallback to default position
+                Location = new Point(100, 100);
+            }
+
+            // 메인 컨테이너
+            Panel mainPanel = new Panel
+            {
+                Dock = DockStyle.Fill,
+                Padding = new Padding(10)
+            };
+            Controls.Add(mainPanel);
+
+            // 경고 텍스트 (한글)
+            Label lblWarningKR = new Label
+            {
+                Text = "세이브 파일 크기 경고",
+                ForeColor = Color.White,
+                Font = new Font("맑은 고딕", 11, FontStyle.Bold),
+                AutoSize = false,
+                Size = new Size(300, 25),
+                Location = new Point(10, 10),
+                TextAlign = ContentAlignment.MiddleCenter
+            };
+            mainPanel.Controls.Add(lblWarningKR);
+
+            // 경고 텍스트 (영문)
+            Label lblWarningEN = new Label
+            {
+                Text = "Save File Size Warning",
+                ForeColor = Color.Yellow,
+                Font = new Font("Arial", 9, FontStyle.Bold),
+                AutoSize = false,
+                Size = new Size(300, 20),
+                Location = new Point(10, 35),
+                TextAlign = ContentAlignment.MiddleCenter
+            };
+            mainPanel.Controls.Add(lblWarningEN);
+
+            // 파일 정보
+            double percentage = (double)fileSize / FileConstants.MaxFileSize * 100;
+            Label lblInfo = new Label
+            {
+                Text = $"{fileName}\n{fileSize}/{FileConstants.MaxFileSize} bytes ({percentage:F1}%)",
+                ForeColor = Color.White,
+                Font = new Font("Consolas", 8),
+                AutoSize = false,
+                Size = new Size(300, 35),
+                Location = new Point(10, 60),
+                TextAlign = ContentAlignment.MiddleCenter
+            };
+            mainPanel.Controls.Add(lblInfo);
+        }
+
+        // Win32 API 선언
+        [System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true)]
+        private static extern int GetWindowLong(IntPtr hWnd, int nIndex);
+
+        [System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true)]
+        private static extern int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);
+    }
+    #endregion
+
+    #region Localization
+    /// <summary>
+    /// 지원하는 언어 / Supported Languages
+    /// </summary>
+    public enum Language
+    {
+        Korean,
+        English
+    }
+
+    /// <summary>
+    /// 다국어 관리 클래스 / Language Manager
+    /// </summary>
+    public static class LanguageManager
+    {
+        private static Language currentLanguage = Language.English;
+        public static event EventHandler LanguageChanged;
+
+        private const string RegistryKey = @"Software\D2RMonitor";
+
+        public static Language CurrentLanguage
+        {
+            get => currentLanguage;
+            set
+            {
+                if (currentLanguage != value)
+                {
+                    currentLanguage = value;
+                    SaveLanguage();
+                    LanguageChanged?.Invoke(null, EventArgs.Empty);
+                }
+            }
+        }
+
+        public static void LoadLanguage()
+        {
+            try
+            {
+                using (RegistryKey key = Registry.CurrentUser.CreateSubKey(RegistryKey))
+                {
+                    if (key != null)
+                    {
+                        int langValue = (int)key.GetValue("Language", 1);  // Default to English (1)
+                        currentLanguage = (Language)langValue;
+                    }
+                }
+            }
+            catch
+            {
+                currentLanguage = Language.English;  // Default to English on error
+            }
+        }
+
+        private static void SaveLanguage()
+        {
+            try
+            {
+                using (RegistryKey key = Registry.CurrentUser.CreateSubKey(RegistryKey))
+                {
+                    if (key != null)
+                    {
+                        key.SetValue("Language", (int)currentLanguage);
+                    }
+                }
+            }
+            catch
+            {
+                // Save failed - non-critical
+            }
+        }
+
+        public static string GetString(string key)
+        {
+            if (currentLanguage == Language.Korean)
+            {
+                return Strings_KR.ContainsKey(key) ? Strings_KR[key] : key;
+            }
+            else
+            {
+                return Strings_EN.ContainsKey(key) ? Strings_EN[key] : key;
+            }
+        }
+
+        // 한국어 리소스
+        private static readonly Dictionary<string, string> Strings_KR = new Dictionary<string, string>
+        {
+            // 메인 GUI
+            ["MainTitle"] = "디아블로 2 레저렉션 세이브 모니터",
+            ["SavePathLabel"] = "세이브 파일 경로:",
+            ["BrowseButton"] = "찾아보기...",
+            ["OpenSaveFolder"] = "세이브 폴더 열기",
+            ["OpenBackupFolder"] = "백업 폴더 열기",
+            ["ColumnFileName"] = "캐릭터 파일명",
+            ["ColumnCurrentSize"] = "현재 크기",
+            ["ColumnPercentage"] = "비율",
+            ["ColumnMaxSize"] = "최대 크기",
+            ["ColumnStatus"] = "상태",
+            ["SelectedFiles"] = "선택된 파일",
+            ["BackupSelected"] = "선택 백업",
+            ["RestoreBackup"] = "백업 복원",
+            ["BackupSettings"] = "백업 설정",
+            ["StatusSafe"] = "안전",
+            ["StatusWarning"] = "경고",
+            ["StatusDanger"] = "위험",
+
+            // 백업 설정
+            ["BackupSettingsTitle"] = "백업 설정",
+            ["AutoBackupSettings"] = "자동 백업 설정:",
+            ["AutoBackupDanger"] = "위험 수준(7500 bytes) 도달 시 자동 백업",
+            ["EnableCompression"] = "백업 파일 압축 (디스크 공간 50~70% 절약)",
+            ["PeriodicBackupSettings"] = "주기적 백업 설정:",
+            ["PeriodicBackupEnable"] = "주기적 자동 백업 활성화",
+            ["BackupIntervalMin"] = "백업 주기(분):",
+            ["Minutes"] = "분",
+            ["BackupRetentionSettings"] = "백업 보관 설정:",
+            ["MaxBackupsPerFile"] = "파일당 최대 백업 개수:",
+            ["BackupCooldownSec"] = "자동 백업 쿨다운(초):",
+            ["Seconds"] = "초",
+            ["Count"] = "개",
+            ["ResetDefaults"] = "기본값으로 복원",
+            ["Cancel"] = "취소",
+            ["Save"] = "저장",
+            ["SaveSuccess"] = "설정이 저장되었습니다.\n\n참고: 압축 설정은 새로 생성되는 백업부터 적용됩니다.",
+            ["SaveSuccessTitle"] = "저장 완료",
+            ["ResetConfirm"] = "모든 설정을 기본값으로 복원하시겠습니까?",
+            ["ResetConfirmTitle"] = "기본값 복원",
+
+            // 백업 복원
+            ["BackupHistoryTitle"] = "백업 목록 및 복원",
+            ["CharacterFilter"] = "캐릭터 필터:",
+            ["AllCharacters"] = "모든 캐릭터",
+            ["Refresh"] = "새로고침",
+            ["Close"] = "닫기",
+            ["ColumnBackupTime"] = "백업 시간",
+            ["ColumnCharacter"] = "캐릭터",
+            ["ColumnFileSize"] = "파일 크기",
+            ["ColumnCompression"] = "압축",
+            ["ColumnTrigger"] = "백업 원인",
+            ["ColumnType"] = "유형",
+            ["Restore"] = "복원",
+            ["Delete"] = "삭제",
+            ["BackupInfoPlaceholder"] = "백업을 선택하면 상세 정보가 표시됩니다.",
+            ["SelectedBackup"] = "선택된 백업:",
+            ["SelectedBackupInfo"] = "선택된 백업:\n캐릭터: {0}\n백업 파일: {1}\n크기: {2} bytes ({3:F1}%)",
+            ["SelectedBackupCount"] = "선택된 백업: {0}개",
+            ["Compressed"] = "압축",
+            ["Automatic"] = "자동",
+            ["Manual"] = "수동",
+            ["RestoreWithCount"] = "복원 ({0}개)",
+            ["DeleteWithCount"] = "삭제 ({0}개)",
+
+            // 메시지
+            ["SelectSaveFolder"] = "D2R 세이브 파일 폴더를 선택하세요",
+            ["LoadingBackups"] = "백업 목록 로딩 중...",
+            ["BackupLoadFailed"] = "백업 목록 로드 실패:\n{0}",
+            ["RestoreOnlyOne"] = "복원은 한 번에 하나의 백업만 가능합니다.\n첫 번째 선택된 백업만 복원됩니다.",
+            ["Notice"] = "알림",
+            ["RestoreConfirm"] = "다음 백업으로 복원하시겠습니까?\n\n캐릭터: {0}\n백업 시간: {1}\n파일 크기: {2} bytes\n\n현재 파일은 자동으로 백업됩니다.",
+            ["RestoreConfirmTitle"] = "백업 복원 확인",
+            ["RestoreSuccess"] = "복원 완료: {0}\n\n현재 파일은 다음으로 백업되었습니다:\n{1}",
+            ["RestoreSuccessTitle"] = "복원 성공",
+            ["RestoreFailed"] = "복원 실패: {0}",
+            ["RestoreFailedTitle"] = "복원 실패",
+            ["Error"] = "오류",
+            ["DeleteConfirm"] = "다음 백업을 삭제하시겠습니까?\n\n캐릭터: {0}\n백업 시간: {1}\n\n이 작업은 되돌릴 수 없습니다.",
+            ["DeleteMultipleConfirm"] = "{0}개의 백업을 삭제하시겠습니까?\n\n이 작업은 되돌릴 수 없습니다.",
+            ["DeleteConfirmTitle"] = "백업 삭제 확인",
+            ["DeleteSuccess"] = "백업이 삭제되었습니다.",
+            ["DeleteSuccessTitle"] = "삭제 완료",
+            ["DeleteFailed"] = "백업 삭제에 실패했습니다.",
+            ["DeletePartialSuccess"] = "삭제 완료: {0}개 성공, {1}개 실패",
+            ["DeleteMultipleSuccess"] = "삭제 완료: {0}개 백업 삭제",
+            ["DeletePartialTitle"] = "삭제 완료 (일부 실패)",
+            ["DeleteFailedTitle"] = "삭제 실패",
+            ["DeleteFailedWithReason"] = "백업 삭제에 실패했습니다.\n오류: {0}",
+            ["RefreshFailed"] = "새로고침 중 오류 발생:\n{0}",
+
+            // 백업 트리거
+            ["TriggerDanger"] = "위험 수준 도달",
+            ["TriggerPeriodic"] = "주기적 자동",
+            ["TriggerManual"] = "수동",
+            ["TriggerManualSingle"] = "수동 백업 (단일)",
+            ["TriggerManualBulk"] = "수동 백업 (전체)",
+            ["TriggerPreRestore"] = "복원 전",
+            ["CompressionRatioFormat"] = "압축 {0:F0}%",
+            ["CompressionNotAvailable"] = "-",
+            ["NoBackups"] = "백업이 없습니다.",
+            ["Unknown"] = "알 수 없음",
+
+            // 언어 설정
+            ["Language"] = "언어 / Language",
+            ["LanguageSettings"] = "언어 설정:",
+            ["Korean"] = "한국어",
+            ["English"] = "English",
+
+            // Form1 UI 추가 strings
+            ["BtnBrowse"] = "찾아보기...",
+            ["BtnOpenSaveFolder"] = "📁 세이브",
+            ["BtnOpenBackupFolder"] = "📁 백업",
+            ["TipOpenSaveFolder"] = "세이브 폴더 열기",
+            ["TipOpenBackupFolder"] = "백업 폴더 열기",
+            ["ColFileName"] = "캐릭터 파일명",
+            ["ColCurrentSize"] = "현재 크기",
+            ["ColLimit"] = "제한",
+            ["ColPercentage"] = "사용률",
+            ["ColProgressBar"] = "진행 상태",
+            ["ColStatus"] = "상태",
+            ["GrpBackup"] = "백업 관리",
+            ["BtnBackupSelected"] = "선택 파일 백업",
+            ["BtnBackupAll"] = "전체 백업",
+            ["BtnViewBackups"] = "백업 복원...",
+            ["BtnBackupSettings"] = "백업 설정...",
+            ["LblLastBackup"] = "마지막 백업",
+            ["None"] = "없음",
+            ["AutoBackup"] = "자동 백업",
+            ["AutoBackupDangerOn"] = "위험 수준 도달 시 자동 백업: 사용",
+            ["AutoBackupDangerOff"] = "위험 수준 자동 백업: 사용 안 함",
+            ["PeriodicBackup"] = "주기적 백업",
+            ["PeriodicBackupOnSummary"] = "주기 백업: {0} 간격 | 범위: {1}",
+            ["PeriodicBackupOffSummary"] = "주기 백업: 사용 안 함",
+            ["BackupLocationInfo"] = "백업 위치: {0}",
+            ["PeriodicRangeDanger"] = "위험 구간",
+            ["PeriodicRangeWarning"] = "경고 이상",
+            ["PeriodicRangeAll"] = "전체 구간",
+            ["Enabled"] = "활성화",
+            ["Disabled"] = "비활성화",
+            ["StatusMonitoring"] = "모니터링 대기 중...",
+            ["BackupInitFailed"] = "백업 시스템 초기화 실패",
+            ["MonitoringContinues"] = "모니터링은 계속됩니다",
+            ["Warning"] = "경고"
+        };
+
+        // 영어 리소스
+        private static readonly Dictionary<string, string> Strings_EN = new Dictionary<string, string>
+        {
+            // Main GUI
+            ["MainTitle"] = "Diablo 2 Resurrected Save Monitor",
+            ["SavePathLabel"] = "Save File Path:",
+            ["BrowseButton"] = "Browse...",
+            ["OpenSaveFolder"] = "Open Save Folder",
+            ["OpenBackupFolder"] = "Open Backup Folder",
+            ["ColumnFileName"] = "Character File",
+            ["ColumnCurrentSize"] = "Current Size",
+            ["ColumnPercentage"] = "Percentage",
+            ["ColumnMaxSize"] = "Max Size",
+            ["ColumnStatus"] = "Status",
+            ["SelectedFiles"] = "Selected Files",
+            ["BackupSelected"] = "Backup Selected",
+            ["RestoreBackup"] = "Restore Backup",
+            ["BackupSettings"] = "Backup Settings",
+            ["StatusSafe"] = "Safe",
+            ["StatusWarning"] = "Warning",
+            ["StatusDanger"] = "Danger",
+
+            // Backup Settings
+            ["BackupSettingsTitle"] = "Backup Settings",
+            ["AutoBackupSettings"] = "Auto Backup Settings:",
+            ["AutoBackupDanger"] = "Auto-backup at danger level (7500 bytes)",
+            ["EnableCompression"] = "Enable backup compression (50~70% disk space savings)",
+            ["PeriodicBackupSettings"] = "Periodic Backup Settings:",
+            ["PeriodicBackupEnable"] = "Enable periodic auto-backup",
+            ["BackupIntervalMin"] = "Backup interval (min):",
+            ["Minutes"] = "min",
+            ["BackupRetentionSettings"] = "Backup Retention Settings:",
+            ["MaxBackupsPerFile"] = "Max backups per file:",
+            ["BackupCooldownSec"] = "Auto-backup cooldown (sec):",
+            ["Seconds"] = "sec",
+            ["Count"] = "count",
+            ["ResetDefaults"] = "Reset to Defaults",
+            ["Cancel"] = "Cancel",
+            ["Save"] = "Save",
+            ["SaveSuccess"] = "Settings saved successfully.\n\nNote: Compression settings apply to new backups only.",
+            ["SaveSuccessTitle"] = "Save Successful",
+            ["ResetConfirm"] = "Reset all settings to defaults?",
+            ["ResetConfirmTitle"] = "Reset Defaults",
+
+            // Backup History
+            ["BackupHistoryTitle"] = "Backup History and Restore",
+            ["CharacterFilter"] = "Character Filter:",
+            ["AllCharacters"] = "All Characters",
+            ["Refresh"] = "Refresh",
+            ["Close"] = "Close",
+            ["ColumnBackupTime"] = "Backup Time",
+            ["ColumnCharacter"] = "Character",
+            ["ColumnFileSize"] = "File Size",
+            ["ColumnCompression"] = "Compression",
+            ["ColumnTrigger"] = "Trigger",
+            ["ColumnType"] = "Type",
+            ["Restore"] = "Restore",
+            ["Delete"] = "Delete",
+            ["BackupInfoPlaceholder"] = "Select a backup to view details.",
+            ["SelectedBackup"] = "Selected backup:",
+            ["SelectedBackupInfo"] = "Selected backup:\nCharacter: {0}\nBackup file: {1}\nSize: {2} bytes ({3:F1}%)",
+            ["SelectedBackupCount"] = "Selected backups: {0}",
+            ["Compressed"] = "Compressed",
+            ["Automatic"] = "Auto",
+            ["Manual"] = "Manual",
+            ["RestoreWithCount"] = "Restore ({0})",
+            ["DeleteWithCount"] = "Delete ({0})",
+
+            // Messages
+            ["SelectSaveFolder"] = "Select D2R save file folder",
+            ["LoadingBackups"] = "Loading backups...",
+            ["BackupLoadFailed"] = "Failed to load backup list:\n{0}",
+            ["RestoreOnlyOne"] = "Only one backup can be restored at a time.\nOnly the first selected backup will be restored.",
+            ["Notice"] = "Notice",
+            ["RestoreConfirm"] = "Restore from this backup?\n\nCharacter: {0}\nBackup time: {1}\nFile size: {2} bytes\n\nCurrent file will be backed up automatically.",
+            ["RestoreConfirmTitle"] = "Confirm Restore",
+            ["RestoreSuccess"] = "Restore complete: {0}\n\nCurrent file backed up as:\n{1}",
+            ["RestoreSuccessTitle"] = "Restore Successful",
+            ["RestoreFailed"] = "Restore failed: {0}",
+            ["RestoreFailedTitle"] = "Restore Failed",
+            ["Error"] = "Error",
+            ["DeleteConfirm"] = "Delete this backup?\n\nCharacter: {0}\nBackup time: {1}\n\nThis action cannot be undone.",
+            ["DeleteMultipleConfirm"] = "Delete {0} backups?\n\nThis action cannot be undone.",
+            ["DeleteConfirmTitle"] = "Confirm Delete",
+            ["DeleteSuccess"] = "Backup deleted successfully.",
+            ["DeleteSuccessTitle"] = "Delete Successful",
+            ["DeleteFailed"] = "Failed to delete backup.",
+            ["DeletePartialSuccess"] = "Delete complete: {0} succeeded, {1} failed",
+            ["DeleteMultipleSuccess"] = "Delete complete: {0} backups removed",
+            ["DeletePartialTitle"] = "Delete Complete (Partial)",
+            ["DeleteFailedTitle"] = "Delete Failed",
+            ["DeleteFailedWithReason"] = "Failed to delete backup.\nError: {0}",
+            ["RefreshFailed"] = "Error while refreshing:\n{0}",
+
+            // Backup Triggers
+            ["TriggerDanger"] = "Danger Level",
+            ["TriggerPeriodic"] = "Periodic Auto",
+            ["TriggerManual"] = "Manual",
+            ["TriggerManualSingle"] = "Manual backup (single)",
+            ["TriggerManualBulk"] = "Manual backup (bulk)",
+            ["TriggerPreRestore"] = "Pre-Restore",
+            ["CompressionRatioFormat"] = "Compressed {0:F0}%",
+            ["CompressionNotAvailable"] = "-",
+            ["NoBackups"] = "No backups found.",
+            ["Unknown"] = "Unknown",
+
+            // Language Settings
+            ["Language"] = "Language / 언어",
+            ["LanguageSettings"] = "Language Settings:",
+            ["Korean"] = "한국어",
+            ["English"] = "English",
+
+            // Form1 UI additional strings
+            ["BtnBrowse"] = "Browse...",
+            ["BtnOpenSaveFolder"] = "📁 Save",
+            ["BtnOpenBackupFolder"] = "📁 Backup",
+            ["TipOpenSaveFolder"] = "Open save folder",
+            ["TipOpenBackupFolder"] = "Open backup folder",
+            ["ColFileName"] = "Character File",
+            ["ColCurrentSize"] = "Current Size",
+            ["ColLimit"] = "Limit",
+            ["ColPercentage"] = "Usage",
+            ["ColProgressBar"] = "Progress",
+            ["ColStatus"] = "Status",
+            ["GrpBackup"] = "Backup Management",
+            ["BtnBackupSelected"] = "Backup Selected",
+            ["BtnBackupAll"] = "Backup All",
+            ["BtnViewBackups"] = "Restore Backup...",
+            ["BtnBackupSettings"] = "Backup Settings...",
+            ["LblLastBackup"] = "Last backup",
+            ["None"] = "None",
+            ["AutoBackup"] = "Auto backup",
+            ["AutoBackupDangerOn"] = "Auto-backup at danger threshold: Enabled",
+            ["AutoBackupDangerOff"] = "Auto-backup at danger threshold: Disabled",
+            ["PeriodicBackup"] = "Periodic backup",
+            ["PeriodicBackupOnSummary"] = "Periodic backup: every {0} | Scope: {1}",
+            ["PeriodicBackupOffSummary"] = "Periodic backup: Disabled",
+            ["BackupLocationInfo"] = "Backup location: {0}",
+            ["PeriodicRangeDanger"] = "Danger only",
+            ["PeriodicRangeWarning"] = "Warning or higher",
+            ["PeriodicRangeAll"] = "Entire range",
+            ["Enabled"] = "Enabled",
+            ["Disabled"] = "Disabled",
+            ["StatusMonitoring"] = "Monitoring...",
+            ["BackupInitFailed"] = "Backup system initialization failed",
+            ["MonitoringContinues"] = "Monitoring will continue",
+            ["Warning"] = "Warning"
+        };
     }
     #endregion
 }
